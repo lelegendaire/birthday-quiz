@@ -11,14 +11,28 @@ import {
   Pencil,
 } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
+
+const MapPicker = dynamic(
+  () => import("@/components/maps/MapPicker"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[400px] items-center justify-center rounded-xl bg-gray-100">
+        Chargement de la carte...
+      </div>
+    ),
+  }
+);
 
 const questionTypes = [
   { value: "multiple_choice", label: "QCM" },
   { value: "free_text", label: "Réponse libre" },
   { value: "slider", label: "Curseur" },
-  { value: "pin", label: "Placer sur une image" },
+  { value: "pin", label: "Placer sur une carte" },
   { value: "ordering", label: "Remettre dans l'ordre" },
   { value: "image_guess", label: "Deviner l'image" },
+  { value: "audio_guess", label: "Deviner le son" },
   { value: "closest_wins", label: "Au plus proche" },
 ];
 
@@ -37,6 +51,15 @@ type Question = {
     answers?: Answer[];
     correctAnswerId?: string;
     expectedAnswer?: string;
+    min?: number;
+    max?: number;
+    target?: number;
+    imageUrl?: string;
+    audioUrl?: string;
+    targetLat?: number;
+    targetLng?: number;
+    items?: { id: string; text: string }[];
+    correctOrder?: string[];
   };
 };
 
@@ -59,6 +82,14 @@ function QuizEditorContent() {
   );
   const [correctAnswerId, setCorrectAnswerId] = useState("a");
   const [expectedAnswer, setExpectedAnswer] = useState("");
+  const [minValue, setMinValue] = useState(0);
+  const [maxValue, setMaxValue] = useState(100);
+  const [targetValue, setTargetValue] = useState(50);
+  const [imageUrl, setImageUrl] = useState("");
+  const [audioUrl, setAudioUrl] = useState("");
+  const [targetLat, setTargetLat] = useState(48.8566);
+  const [targetLng, setTargetLng] = useState(2.3522);
+  const [orderingItems, setOrderingItems] = useState(["", "", ""]);
   const [creatingGame, setCreatingGame] = useState(false);
   const [gamePin, setGamePin] = useState("");
   const [gameError, setGameError] = useState("");
@@ -100,6 +131,14 @@ function QuizEditorContent() {
     );
     setCorrectAnswerId(question.config.correctAnswerId ?? "a");
     setExpectedAnswer(question.config.expectedAnswer ?? "");
+    setMinValue(question.config.min ?? 0);
+    setMaxValue(question.config.max ?? 100);
+    setTargetValue(question.config.target ?? 50);
+    setImageUrl(question.config.imageUrl ?? "");
+    setAudioUrl(question.config.audioUrl ?? "");
+    setTargetLat(question.config.targetLat ?? 48.8566);
+    setTargetLng(question.config.targetLng ?? 2.3522);
+    setOrderingItems(question.config.items?.map(item => item.text) ?? ["", "", ""]);
     setError("");
     setSuccess("");
 
@@ -121,8 +160,25 @@ function QuizEditorContent() {
       return;
     }
 
-    if (type === "free_text" && !expectedAnswer.trim()) {
+    if ((type === "free_text" || type === "image_guess" || type === "audio_guess") && !expectedAnswer.trim()) {
       setError("Renseigne la réponse attendue avant d'enregistrer la question.");
+      return;
+    }
+
+    if (type === "slider" && !(maxValue > minValue && targetValue >= minValue && targetValue <= maxValue)) {
+      setError("Pour le curseur, la valeur cible doit être comprise entre le minimum et le maximum.");
+      return;
+    }
+    if (type === "image_guess" && !imageUrl.trim()) {
+      setError("Ajoute une URL d'image valide.");
+      return;
+    }
+    if (type === "audio_guess" && !audioUrl.trim()) {
+      setError("Ajoute une URL audio valide.");
+      return;
+    }
+    if (type === "ordering" && (orderingItems.filter(item => item.trim()).length < 2 || orderingItems.some(item => !item.trim()))) {
+      setError("Renseigne au moins deux éléments et complète chaque ligne.");
       return;
     }
 
@@ -152,7 +208,22 @@ function QuizEditorContent() {
                   }
                 : type === "free_text"
                   ? { expectedAnswer: expectedAnswer.trim() }
-                  : {},
+                  : type === "slider"
+                    ? { min: minValue, max: maxValue, target: targetValue }
+                    : type === "pin"
+                      ? { targetLat, targetLng }
+                      : type === "ordering"
+                        ? {
+                            items: orderingItems.map((text, index) => ({ id: String(index + 1), text: text.trim() })),
+                            correctOrder: orderingItems.map((_, index) => String(index + 1)),
+                          }
+                        : type === "image_guess"
+                          ? { imageUrl: imageUrl.trim(), expectedAnswer: expectedAnswer.trim() }
+                          : type === "audio_guess"
+                            ? { audioUrl: audioUrl.trim(), expectedAnswer: expectedAnswer.trim() }
+                            : type === "closest_wins"
+                              ? { target: targetValue, min: minValue, max: maxValue }
+                              : {},
           }),
         },
       );
@@ -186,6 +257,14 @@ function QuizEditorContent() {
       setAnswers(["", "", "", ""]);
       setCorrectAnswerId("a");
       setExpectedAnswer("");
+      setImageUrl("");
+      setAudioUrl("");
+      setMinValue(0);
+      setMaxValue(100);
+      setTargetValue(50);
+      setTargetLat(50);
+      setTargetLng(50);
+      setOrderingItems(["", "", ""]);
       setEditingQuestionId(null);
       setSuccess("Question enregistrée !");
     } catch (err) {
@@ -524,7 +603,7 @@ function QuizEditorContent() {
                 </select>
               </div>
 
-              {type === "free_text" && (
+              {(type === "free_text" || type === "image_guess" || type === "audio_guess") && (
                 <div>
                   <label
                     htmlFor="expected-answer"
@@ -537,13 +616,58 @@ function QuizEditorContent() {
                     type="text"
                     value={expectedAnswer}
                     onChange={(event) => setExpectedAnswer(event.target.value)}
-                    placeholder="Ex. Rome"
+                    placeholder={type === "audio_guess" ? "Ex. Le bruit d'un chat" : type === "image_guess" ? "Ex. Tour Eiffel" : "Ex. Rome"}
                     maxLength={500}
                     className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none transition focus:border-[#a78bfa]"
                   />
                   <p className="mt-2 text-xs text-white/40">
                     Cette réponse sert de référence à l'organisateur. Les joueurs ne la verront pas.
                   </p>
+                </div>
+              )}
+
+              {type === "pin" && (
+                <div className="space-y-3">
+                  <p className="text-sm text-white/70">Clique sur la carte pour définir l'emplacement correct. Les joueurs ne verront pas ce marqueur.</p>
+                  <MapPicker value={{ lat: targetLat, lng: targetLng }} onChange={(point) => { setTargetLat(point.lat); setTargetLng(point.lng); }} center={[48.8566, 2.3522]} zoom={5} />
+                  <p className="text-xs text-white/40">Latitude : {targetLat.toFixed(5)} · Longitude : {targetLng.toFixed(5)}</p>
+                </div>
+              )}
+
+              {type === "image_guess" && (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-white/70">URL de l'image</label>
+                  <input value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} type="url" placeholder="https://exemple.com/image.jpg" className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none focus:border-[#a78bfa]" />
+                </div>
+              )}
+
+              {type === "audio_guess" && (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-white/70">URL du fichier audio</label>
+                  <input value={audioUrl} onChange={(event) => setAudioUrl(event.target.value)} type="url" placeholder="https://exemple.com/son.mp3" className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none focus:border-[#a78bfa]" />
+                </div>
+              )}
+
+              {(type === "slider" || type === "closest_wins") && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm text-white/70">Minimum<input type="number" value={minValue} onChange={e => setMinValue(Number(e.target.value))} className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 p-3" /></label>
+                    <label className="text-sm text-white/70">Maximum<input type="number" value={maxValue} onChange={e => setMaxValue(Number(e.target.value))} className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 p-3" /></label>
+                  </div>
+                  <label className="block text-sm text-white/70">Valeur cible<input type="number" value={targetValue} onChange={e => setTargetValue(Number(e.target.value))} className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 p-3" /></label>
+                  <p className="text-xs text-white/40">La valeur cible est conservée dans la configuration privée de la question.</p>
+                </div>
+              )}
+
+              {type === "ordering" && (
+                <div className="space-y-3">
+                  <p className="text-sm font-medium text-white/70">Éléments dans le bon ordre</p>
+                  <p className="text-xs text-white/40">Saisis les éléments dans l'ordre attendu. Les joueurs devront les réordonner.</p>
+                  {orderingItems.map((item, index) => (
+                    <input key={index} value={item} onChange={e => setOrderingItems(current => current.map((value, i) => i === index ? e.target.value : value))} placeholder={`Élément ${index + 1}`} className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none focus:border-[#a78bfa]" />
+                  ))}
+                  <button type="button" onClick={() => setOrderingItems(current => current.length < 10 ? [...current, ""] : current)} disabled={orderingItems.length >= 10} className="rounded-lg border border-white/15 px-3 py-2 text-sm text-white/70 disabled:opacity-40">Ajouter un élément</button>
+                  <button type="button" onClick={() => setOrderingItems(current => current.length > 2 ? current.slice(0, -1) : current)} disabled={orderingItems.length <= 2} className="ml-2 rounded-lg border border-white/15 px-3 py-2 text-sm text-white/70 disabled:opacity-40">Retirer</button>
                 </div>
               )}
 

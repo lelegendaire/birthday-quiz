@@ -4,6 +4,19 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Copy, Users, Clock3, RefreshCw } from "lucide-react";
+import dynamic from "next/dynamic";
+
+const MapPicker = dynamic(
+  () => import("@/components/maps/MapPicker"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[400px] items-center justify-center rounded-xl bg-gray-100 text-gray-600">
+        Chargement de la carte...
+      </div>
+    ),
+  }
+);
 
 type Player = {
   id: string;
@@ -27,6 +40,11 @@ type PublicQuestion = {
   position: number;
   config: {
     answers?: { id: string; text: string }[];
+    min?: number;
+    max?: number;
+    imageUrl?: string;
+    audioUrl?: string;
+    items?: { id: string; text: string }[];
   };
   hasAnswered?: boolean;
 };
@@ -48,6 +66,9 @@ function GameLobbyContent() {
 const searchParams = useSearchParams();
 const playerId = searchParams.get("player") ?? "";
 const [freeText, setFreeText] = useState("");
+const [numericAnswer, setNumericAnswer] = useState(0);
+const [selectedPoint, setSelectedPoint] = useState<{ lat: number; lng: number } | null>(null);
+const [orderIds, setOrderIds] = useState<string[]>([]);
 const [pendingAnswers, setPendingAnswers] = useState<PendingAnswer[]>([]);
 const [reviewError, setReviewError] = useState("");
 const [selectedAnswerId, setSelectedAnswerId] = useState("");
@@ -99,6 +120,45 @@ setHasAnswered(Boolean(data.currentQuestion?.hasAnswered));
       setLoading(false);
     }
   }, [gameId,playerId]);
+
+
+async function nextQuestion() {
+  const hostToken = sessionStorage.getItem(
+    `quizpop_host_token_${gameId}`
+  );
+
+  if (!hostToken) {
+    setStartError("Jeton organisateur introuvable.");
+    return;
+  }
+
+  setStartError("");
+
+  try {
+    const response = await fetch(`/api/games/${gameId}/next`, {
+      method: "POST",
+      headers: {
+        "x-host-token": hostToken,
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.error || "Impossible de passer à la question suivante."
+      );
+    }
+
+    await loadGame();
+  } catch (error) {
+    setStartError(
+      error instanceof Error
+        ? error.message
+        : "Une erreur est survenue."
+    );
+  }
+}
 
 async function startGame() {
   const hostToken = sessionStorage.getItem(
@@ -197,27 +257,28 @@ async function submitAnswer() {
   return;
 }
 
-if (currentQuestion.type === "multiple_choice" && !selectedAnswerId) {
-  return;
-}
-
-if (currentQuestion.type === "free_text" && !freeText.trim()) {
-  return;
-}
+if (currentQuestion.type === "multiple_choice" && !selectedAnswerId) return;
+if (["free_text", "image_guess", "audio_guess"].includes(currentQuestion.type) && !freeText.trim()) return;
+if (["slider", "closest_wins"].includes(currentQuestion.type) && !Number.isFinite(numericAnswer)) return;
+if (currentQuestion.type === "pin" && !selectedPoint) return;
+if (currentQuestion.type === "ordering" && orderIds.length === 0) return;
 
   setSubmittingAnswer(true);
   setAnswerFeedback("");
 
   try {
+    const answerPayload = currentQuestion.type === "multiple_choice"
+      ? { answerId: selectedAnswerId }
+      : { answerText:
+          ["free_text", "image_guess", "audio_guess"].includes(currentQuestion.type) ? freeText.trim()
+          : ["slider", "closest_wins"].includes(currentQuestion.type) ? String(numericAnswer)
+          : currentQuestion.type === "pin" ? JSON.stringify(selectedPoint)
+          : currentQuestion.type === "ordering" ? JSON.stringify(orderIds)
+          : "" };
     const response = await fetch(`/api/games/${gameId}/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-  playerId,
-  ...(currentQuestion.type === "free_text"
-    ? { answerText: freeText.trim() }
-    : { answerId: selectedAnswerId }),
-}),
+      body: JSON.stringify({ playerId, ...answerPayload }),
     });
 
     const data = await response.json();
@@ -245,6 +306,10 @@ useEffect(() => {
   setSelectedAnswerId("");
   setFreeText("");
   setAnswerFeedback("");
+  setSelectedPoint(null);
+  setNumericAnswer(currentQuestion?.config.min ?? 0);
+  const items = currentQuestion?.config.items ?? [];
+  setOrderIds(items.map(item => item.id).sort(() => Math.random() - 0.5));
   setHasAnswered(Boolean(currentQuestion?.hasAnswered));
 }, [currentQuestion?.id]);
 
@@ -485,8 +550,14 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   </div>
 )}
 
-{currentQuestion.type === "free_text" && !isHost && (
+{["free_text", "image_guess", "audio_guess"].includes(currentQuestion.type) && !isHost && (
   <div className="mt-6">
+    {currentQuestion.type === "image_guess" && currentQuestion.config.imageUrl && (
+      <img src={currentQuestion.config.imageUrl} alt="Image à deviner" className="mb-4 max-h-80 w-full rounded-xl object-contain" />
+    )}
+    {currentQuestion.type === "audio_guess" && currentQuestion.config.audioUrl && (
+      <audio controls src={currentQuestion.config.audioUrl} className="mb-4 w-full">Ton navigateur ne prend pas en charge l'audio.</audio>
+    )}
     <label
       htmlFor="free-answer"
       className="mb-2 block text-sm font-bold text-white/70"
@@ -530,11 +601,51 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   </div>
 )}
 
+{!isHost && currentQuestion.type === "slider" && (
+  <div className="mt-6 space-y-3">
+    <div className="flex justify-between text-sm text-white/50"><span>{currentQuestion.config.min}</span><span>{currentQuestion.config.max}</span></div>
+    <input type="range" min={currentQuestion.config.min ?? 0} max={currentQuestion.config.max ?? 100} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full accent-[#facc15]" />
+    <p className="text-center text-3xl font-black text-[#facc15]">{numericAnswer}</p>
+    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider ma réponse"}</button>}
+  </div>
+)}
+
+{!isHost && currentQuestion.type === "closest_wins" && (
+  <div className="mt-6">
+    <label className="mb-2 block text-sm font-bold text-white/70">Ta estimation</label>
+    <input type="number" min={currentQuestion.config.min} max={currentQuestion.config.max} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none focus:border-[#c4b5fd] disabled:opacity-50" />
+    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Envoyer mon estimation"}</button>}
+  </div>
+)}
+
+{!isHost && currentQuestion.type === "pin" && (
+  <div className="mt-6 space-y-3">
+    <p className="text-sm text-white/60">Zoome et déplace la carte, puis clique sur l'endroit que tu penses correct.</p>
+    <MapPicker value={selectedPoint} onChange={setSelectedPoint} disabled={hasAnswered || submittingAnswer || !playerId} center={[20, 0]} zoom={2} />
+    {selectedPoint && <p className="text-xs text-white/50">Position choisie : {selectedPoint.lat.toFixed(3)}, {selectedPoint.lng.toFixed(3)}</p>}
+    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={!selectedPoint || submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider la position"}</button>}
+  </div>
+)}
+
+{!isHost && currentQuestion.type === "ordering" && currentQuestion.config.items && (
+  <div className="mt-6 space-y-2">
+    <p className="mb-3 text-sm text-white/60">Utilise les flèches pour remettre les éléments dans l'ordre.</p>
+    {orderIds.map((id, index) => {
+      const item = currentQuestion.config.items?.find(entry => entry.id === id);
+      if (!item) return null;
+      return <div key={id} className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 p-3"><span className="flex-1">{item.text}</span><button type="button" disabled={index === 0 || hasAnswered || submittingAnswer} onClick={() => setOrderIds(current => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Monter">↑</button><button type="button" disabled={index === orderIds.length - 1 || hasAnswered || submittingAnswer} onClick={() => setOrderIds(current => { const next = [...current]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Descendre">↓</button></div>;
+    })}
+    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider l'ordre"}</button>}
+  </div>
+)}
+
 {isHost && (
   <div className="mt-8 border-t border-white/10 pt-6">
-    <h3 className="text-xl font-black">
-      Réponses à corriger ({pendingAnswers.length})
-    </h3>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h3 className="text-xl font-black">Réponses à corriger ({pendingAnswers.length})</h3>
+      <button type="button" onClick={() => void nextQuestion()} className="rounded-xl bg-[#8b5cf6] px-4 py-3 font-bold text-white transition hover:bg-[#7c3aed]">Question suivante →</button>
+    </div>
+    {startError && <p role="alert" className="mt-3 text-sm text-red-300">{startError}</p>}
 
     <p className="mt-2 text-sm text-white/50">
       Valide chaque réponse pour attribuer les points.
@@ -624,15 +735,36 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   </div>
 )}
 
-      <p className="mt-6 text-sm text-white/40">
-        La question est lancée. Le système de réponses sera ajouté à
-        l'étape suivante.
+{isHost && game?.status === "playing" && (
+  <div className="mt-6">
+    <button
+      type="button"
+      onClick={() => void nextQuestion()}
+      className="rounded-xl bg-violet-600 px-6 py-3 font-bold text-white transition hover:bg-violet-700"
+    >
+      Question suivante →
+    </button>
+
+    {startError && (
+      <p className="mt-2 text-sm text-red-400" role="alert">
+        {startError}
       </p>
+    )}
+  </div>
+)}
+
+      <p className="mt-6 text-sm text-white/40">Les réponses sont actualisées automatiquement.</p>
     </section>
   ) : game.status === "playing" ? (
     <p className="text-white/60">
       Chargement de la question...
     </p>
+  ) : game.status === "finished" ? (
+    <section className="mx-auto max-w-xl rounded-3xl border border-[#facc15]/30 bg-white/5 p-8 text-center">
+      <h2 className="text-3xl font-black text-[#facc15]">Quiz terminé !</h2>
+      <p className="mt-3 text-white/60">Merci d'avoir joué. Voici les scores finaux.</p>
+      <div className="mt-5 space-y-2 text-left">{[...players].sort((a, b) => b.score - a.score).map((player, index) => <div key={player.id} className="flex items-center justify-between rounded-xl bg-black/20 p-3"><span>{index + 1}. {player.nickname}</span><strong className="text-[#facc15]">{player.score} pts</strong></div>)}</div>
+    </section>
   ) : isHost ? (
     <>
       <p className="text-sm text-white/50">
