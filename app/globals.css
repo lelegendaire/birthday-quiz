@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+  --background: #130b2b;
+  --foreground: #faf7ff;
+  --purple: #7c3aed;
+  --yellow: #fde047;
+  --pink: #fb7185;
+  --turquoise: #2dd4bf;
 }
 
 @theme inline {
@@ -19,8 +24,37 @@
   }
 }
 
-body {
+html {
+  min-height: 100%;
   background: var(--background);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(
+      ellipse at 15% 0%,
+      rgba(124, 58, 237, 0.24),
+      transparent 45%
+    ),
+    var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  color: #130b2b;
+  background: #fde047;
 }
