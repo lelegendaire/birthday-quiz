@@ -5,13 +5,16 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Copy, Users, Clock3, RefreshCw } from "lucide-react";
 import dynamic from "next/dynamic";
-
+import { ScoreBurst } from "@/components/game/ScoreBurst";
+import { Podium } from "@/components/game/Podium";
+import { Leaderboard } from "@/components/game/Leaderboard";
+import { AnimatePresence, motion } from "framer-motion";
 const MapPicker = dynamic(
   () => import("@/components/maps/MapPicker"),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[400px] items-center justify-center rounded-xl bg-gray-100 text-gray-600">
+      <div className="flex h-100 items-center justify-center rounded-xl bg-gray-100 text-gray-600">
         Chargement de la carte...
       </div>
     ),
@@ -47,6 +50,10 @@ type PublicQuestion = {
     items?: { id: string; text: string }[];
   };
   hasAnswered?: boolean;
+myAnswer?: {
+  pointsAwarded: number;
+  isCorrect: boolean | null;
+} | null;
 };
 
 type PendingAnswer = {
@@ -58,6 +65,11 @@ type PendingAnswer = {
   answerText: string | null;
   points: number;
   answeredAt: string;
+};
+
+type ScoreFeedback = {
+  total: number;
+  bonus: number;
 };
 
 function GameLobbyContent() {
@@ -478,20 +490,31 @@ async function reviewAnswer(answerId: string, correct: boolean) {
             </div>
           ) : (
             <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {players.map((player, index) => (
-                <div
-                  key={player.id}
-                  className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/10 p-4"
-                >
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#8b5cf6]/20 font-black text-[#c4b5fd]">
-                    {index + 1}
-                  </div>
+              
+{players.length === 0 ? (
+  <div className="mt-6 rounded-2xl border border-dashed border-white/15 px-5 py-12 text-center">
+    <Clock3
+      size={36}
+      className="mx-auto text-white/30"
+    />
 
-                  <p className="min-w-0 truncate font-semibold">
-                    {player.nickname}
-                  </p>
-                </div>
-              ))}
+    <p className="mt-4 font-semibold">
+      En attente des joueurs...
+    </p>
+
+    <p className="mt-2 text-sm text-white/45">
+      Envoie le PIN à tes amis pour commencer à remplir la salle.
+    </p>
+  </div>
+) : (
+  <div className="mt-6">
+    <Leaderboard
+      players={players}
+      highlightId={playerId || undefined}
+    />
+  </div>
+)}
+
             </div>
           )}
 
@@ -518,7 +541,36 @@ async function reviewAnswer(answerId: string, correct: boolean) {
         <span>{currentQuestion.points} points</span>
       </div>
 
-     
+{!isHost && hasAnswered && currentQuestion.myAnswer && (
+  currentQuestion.myAnswer.isCorrect === null ? (
+    <div className="mt-6 rounded-2xl border border-[#c4b5fd]/30 bg-[#8b5cf6]/10 p-5 text-center">
+      <p className="font-bold text-[#c4b5fd]">
+        Réponse envoyée !
+      </p>
+      <p className="mt-2 text-sm text-white/60">
+        En attente de la correction de l'organisateur.
+      </p>
+    </div>
+  ) : currentQuestion.myAnswer.pointsAwarded > 0 ? (
+    <ScoreBurst
+      key={currentQuestion.id}
+      total={currentQuestion.myAnswer.pointsAwarded}
+      bonus={0}
+      isCorrect={currentQuestion.myAnswer.isCorrect}
+    />
+  ) : (
+    <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5 text-center">
+      <p className="text-3xl font-black text-white/70">
+        +0 point
+      </p>
+      <p className="mt-2 text-sm font-semibold text-white/60">
+        Pas de points cette fois. La prochaine sera la bonne !
+      </p>
+    </div>
+  )
+)}
+
+
 {currentQuestion.config.answers && (
   <div className="mt-6 grid gap-3 sm:grid-cols-2">
     {currentQuestion.config.answers.map((answer, index) => {
@@ -759,13 +811,40 @@ async function reviewAnswer(answerId: string, correct: boolean) {
     <p className="text-white/60">
       Chargement de la question...
     </p>
-  ) : game.status === "finished" ? (
-    <section className="mx-auto max-w-xl rounded-3xl border border-[#facc15]/30 bg-white/5 p-8 text-center">
-      <h2 className="text-3xl font-black text-[#facc15]">Quiz terminé !</h2>
-      <p className="mt-3 text-white/60">Merci d'avoir joué. Voici les scores finaux.</p>
-      <div className="mt-5 space-y-2 text-left">{[...players].sort((a, b) => b.score - a.score).map((player, index) => <div key={player.id} className="flex items-center justify-between rounded-xl bg-black/20 p-3"><span>{index + 1}. {player.nickname}</span><strong className="text-[#facc15]">{player.score} pts</strong></div>)}</div>
-    </section>
-  ) : isHost ? (
+ 
+) : game.status === "finished" ? (
+  <section className="mx-auto max-w-2xl rounded-3xl border border-[#facc15]/30 bg-white/5 p-6 text-center sm:p-8">
+    <p className="text-sm font-bold uppercase tracking-[0.25em] text-[#c4b5fd]">
+      Fin de la partie
+    </p>
+
+    <h2 className="mt-3 text-3xl font-black text-[#facc15] sm:text-4xl">
+      Quiz terminé !
+    </h2>
+
+    <p className="mt-3 text-white/60">
+      Bravo à tous les participants. Voici les résultats !
+    </p>
+
+    {players.length > 0 && (
+      <div className="mt-10">
+        <Podium players={players} />
+      </div>
+    )}
+
+    <div className="mt-10 text-left">
+      <h3 className="mb-4 text-xl font-black">
+        Classement final
+      </h3>
+
+      <Leaderboard
+        players={players}
+        highlightId={playerId || undefined}
+      />
+    </div>
+  </section>
+)
+ : isHost ? (
     <>
       <p className="text-sm text-white/50">
         Tous les joueurs sont-ils prêts ?

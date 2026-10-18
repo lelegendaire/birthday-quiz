@@ -6,12 +6,13 @@ import { Zap } from "lucide-react";
 type ScoreBurstProps = {
   total: number;
   bonus: number;
+  isCorrect?: boolean | null;
 };
 
 const COLORS = ["#fde047", "#2dd4bf", "#fb7185", "#c4b5fd", "#ffffff"];
 const PARTICLES = 20;
 
-export function ScoreBurst({ total, bonus }: ScoreBurstProps) {
+export function ScoreBurst({ total, bonus,isCorrect = true, }: ScoreBurstProps) {
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.4, y: 20 }}
@@ -54,7 +55,9 @@ export function ScoreBurst({ total, bonus }: ScoreBurstProps) {
       </motion.p>
 
       <p className="mt-1 text-sm font-semibold text-white/70">
-        Bonne réponse !
+         {isCorrect
+    ? "Bonne réponse !"
+    : "Tu marques quand même des points !"}
       </p>
 
       {bonus > 0 && (

@@ -57,18 +57,54 @@ export async function GET(request: Request, { params }: RouteContext) {
         }
 
         const playerId = new URL(request.url).searchParams.get("player");
+        
         let hasAnswered = false;
+        let myAnswer: {
+          pointsAwarded: number;
+          isCorrect: boolean | null;
+        } | null = null;
+
         if (playerId) {
-          const [previousAnswer] = await db.select({ id: gameAnswers.id }).from(gameAnswers)
-            .where(and(eq(gameAnswers.gameId, game.id), eq(gameAnswers.playerId, playerId), eq(gameAnswers.questionId, question.id))).limit(1);
+          const [previousAnswer] = await db
+            .select({
+              id: gameAnswers.id,
+              pointsAwarded: gameAnswers.pointsAwarded,
+              isCorrect: gameAnswers.isCorrect,
+            })
+            .from(gameAnswers)
+            .where(
+              and(
+                eq(gameAnswers.gameId, game.id),
+                eq(gameAnswers.playerId, playerId),
+                eq(gameAnswers.questionId, question.id),
+              ),
+            )
+            .limit(1);
+
           hasAnswered = Boolean(previousAnswer);
+
+          if (previousAnswer) {
+            myAnswer = {
+              pointsAwarded: previousAnswer.pointsAwarded,
+              isCorrect: previousAnswer.isCorrect,
+            };
+          }
         }
 
         currentQuestion = {
-          id: question.id, title: question.title, type: question.type,
-          timeLimit: question.timeLimit, points: question.points,
-          position: question.position, config: safeConfig, hasAnswered,
+          id: question.id,
+          title: question.title,
+          type: question.type,
+          timeLimit: question.timeLimit,
+          points: question.points,
+          position: question.position,
+          config: safeConfig,
+          hasAnswered,
+          myAnswer,
         };
+
+
+        
       }
     }
     return NextResponse.json({ game, players, currentQuestion });

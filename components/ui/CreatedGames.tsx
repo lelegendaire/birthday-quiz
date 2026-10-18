@@ -12,6 +12,7 @@ import {
   Gamepad2,
   Users,
   Copy,
+  Check,
   Play,
 } from "lucide-react";
 
@@ -36,7 +37,7 @@ export default function CreatedGames() {
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
+const [copiedPin, setCopiedPin] = useState("");
   async function loadData() {
     setLoading(true);
     setError("");
@@ -73,13 +74,23 @@ export default function CreatedGames() {
     void loadData();
   }, []);
 
-  async function copyPin(pin: string) {
-    try {
-      await navigator.clipboard.writeText(pin);
-    } catch {
-      setError("Impossible de copier le PIN. Tu peux le sélectionner manuellement.");
-    }
+  
+async function copyPin(pin: string) {
+  try {
+    await navigator.clipboard.writeText(pin);
+
+    setCopiedPin(pin);
+
+    window.setTimeout(() => {
+      setCopiedPin((current) => (current === pin ? "" : current));
+    }, 2200);
+  } catch {
+    setError(
+      "Impossible de copier le PIN. Tu peux le sélectionner manuellement."
+    );
   }
+}
+
 
   function statusLabel(status: string) {
     switch (status) {
@@ -255,14 +266,35 @@ export default function CreatedGames() {
                           <span className="text-3xl font-black tracking-[0.2em] text-yellow-300">
                             {game.pin}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => void copyPin(game.pin)}
-                            title="Copier le PIN"
-                            className="rounded-xl border border-white/10 p-3 transition hover:bg-white/10"
-                          >
-                            <Copy size={17} />
-                          </button>
+                          
+<button
+  type="button"
+  onClick={() => void copyPin(game.pin)}
+  title={copiedPin === game.pin ? "Code copié !" : "Copier le PIN"}
+  aria-label={
+    copiedPin === game.pin
+      ? "Code copié"
+      : "Copier le code PIN"
+  }
+  className={`flex min-w-12 items-center justify-center gap-2 rounded-xl border p-3 transition-all duration-200 active:scale-95 ${
+    copiedPin === game.pin
+      ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-300"
+      : "border-white/10 hover:bg-white/10"
+  }`}
+>
+  {copiedPin === game.pin ? (
+    <>
+      <Check
+        size={17}
+        className="animate-[bounce_0.35s_ease-out]"
+      />
+      <span className="text-xs font-bold">Copié !</span>
+    </>
+  ) : (
+    <Copy size={17} />
+  )}
+</button>
+
                         </div>
                       </div>
 
