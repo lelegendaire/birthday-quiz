@@ -1,23 +1,23 @@
-
 import { NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { gameSessions, questions } from "@/lib/db/schema";
 
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+type RouteContext = {
+  params: Promise<{ id: string }>;
+};
+
+export async function POST(request: Request, { params }: RouteContext) {
   try {
     const { id } = await params;
-    const token = request.headers.get("x-host-token");
+    const hostToken = request.headers.get("x-host-token");
 
-    if (!token) {
+    if (!hostToken || hostToken.length > 200) {
       return NextResponse.json(
-        { error: "Jeton organisateur manquant." },
-        { status: 401 }
+        { error: "Autorisation organisateur manquante." },
+        { status: 401 },
       );
     }
 
@@ -28,65 +28,73 @@ export async function POST(
       .limit(1);
 
     if (!game) {
-      return NextResponse.json(
-        { error: "Partie introuvable." },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
     }
 
-    const suppliedHash = createHash("sha256").update(token).digest();
+    const suppliedHash = createHash("sha256").update(hostToken).digest();
     const storedHash = Buffer.from(game.hostTokenHash, "hex");
 
     if (
-      storedHash.length !== suppliedHash.length ||
-      !timingSafeEqual(storedHash, suppliedHash)
+      suppliedHash.length !== storedHash.length ||
+      !timingSafeEqual(suppliedHash, storedHash)
     ) {
       return NextResponse.json(
-        { error: "Jeton organisateur invalide." },
-        { status: 403 }
+        { error: "Tu n'es pas autorisé à piloter cette partie." },
+        { status: 403 },
       );
     }
 
     if (game.status !== "playing") {
       return NextResponse.json(
-        { error: "La partie n'est pas en cours." },
-        { status: 409 }
+        { error: "Cette partie n'est pas en cours." },
+        { status: 409 },
       );
     }
 
-    const allQuestions = await db
-      .select({ id: questions.id })
+    const [{ total }] = await db
+      .select({ total: sql<number>`count(*)::int` })
       .from(questions)
-      .where(eq(questions.quizId, game.quizId))
-      .orderBy(asc(questions.position));
+      .where(eq(questions.quizId, game.quizId));
 
-    const nextIndex = game.currentQuestionIndex + 1;
+    const isLast = game.currentQuestionIndex + 1 >= total;
 
-    if (nextIndex >= allQuestions.length) {
-      await db
-        .update(gameSessions)
-        .set({ status: "finished" })
-        .where(eq(gameSessions.id, id));
+    // La condition sur l'index évite qu'un double clic saute deux questions.
+    const [updated] = await db
+      .update(gameSessions)
+      .set(
+        isLast
+          ? { status: "finished" }
+          : {
+              currentQuestionIndex: game.currentQuestionIndex + 1,
+              questionStartedAt: new Date(),
+            },
+      )
+      .where(
+        and(
+          eq(gameSessions.id, id),
+          eq(gameSessions.status, "playing"),
+          eq(gameSessions.currentQuestionIndex, game.currentQuestionIndex),
+        ),
+      )
+      .returning({
+        status: gameSessions.status,
+        currentQuestionIndex: gameSessions.currentQuestionIndex,
+      });
 
-      return NextResponse.json({ success: true, finished: true });
+    if (!updated) {
+      return NextResponse.json(
+        { error: "La question a déjà changé." },
+        { status: 409 },
+      );
     }
 
-    await db
-      .update(gameSessions)
-      .set({ currentQuestionIndex: nextIndex })
-      .where(eq(gameSessions.id, id));
-
-    return NextResponse.json({
-      success: true,
-      finished: false,
-      currentQuestionIndex: nextIndex,
-    });
+    return NextResponse.json({ game: updated, finished: isLast });
   } catch (error) {
-    console.error(error);
+    console.error("Erreur passage à la question suivante :", error);
 
     return NextResponse.json(
-      { error: "Impossible de passer à la question suivante." },
-      { status: 500 }
+      { error: "Impossible de passer à la suite." },
+      { status: 500 },
     );
   }
 }

@@ -1,0 +1,1925 @@
+diff --git a/app/api/games/[id]/answer/route.ts b/app/api/games/[id]/answer/route.ts
+index 84519ef..d425d0d 100644
+--- a/app/api/games/[id]/answer/route.ts
++++ b/app/api/games/[id]/answer/route.ts
+@@ -3,6 +3,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
+ import { z } from "zod";
+ import { db } from "@/lib/db";
+ import { gameAnswers, gamePlayers, gameSessions, questions } from "@/lib/db/schema";
++import { computeScore, isAnswerTooLate } from "@/lib/scoring";
+ 
+ type RouteContext = { params: Promise<{ id: string }> };
+ const answerSchema = z.object({
+@@ -25,6 +26,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+     const [game] = await db.select({
+       id: gameSessions.id, quizId: gameSessions.quizId, status: gameSessions.status,
+       currentQuestionIndex: gameSessions.currentQuestionIndex,
++      questionStartedAt: gameSessions.questionStartedAt,
+     }).from(gameSessions).where(eq(gameSessions.id, gameId)).limit(1);
+     if (!game) return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
+     if (game.status !== "playing") return NextResponse.json({ error: "Cette partie n'accepte pas de réponses pour le moment." }, { status: 409 });
+@@ -34,11 +36,30 @@ export async function POST(request: Request, { params }: RouteContext) {
+     if (!player) return NextResponse.json({ error: "Ce joueur ne fait pas partie de cette partie." }, { status: 403 });
+ 
+     const [question] = await db.select({
+-      id: questions.id, type: questions.type, points: questions.points, config: questions.config,
++      id: questions.id, type: questions.type, points: questions.points,
++      timeLimit: questions.timeLimit, config: questions.config,
+     }).from(questions).where(eq(questions.quizId, game.quizId))
+       .orderBy(asc(questions.position)).limit(1).offset(game.currentQuestionIndex);
+     if (!question) return NextResponse.json({ error: "Aucune question active n'a été trouvée." }, { status: 404 });
+ 
++    // Temps de réponse mesuré par le serveur (le client n'envoie jamais de durée).
++    const responseTimeMs = game.questionStartedAt
++      ? Math.max(0, Date.now() - game.questionStartedAt.getTime())
++      : null;
++    if (responseTimeMs !== null && isAnswerTooLate(question.timeLimit, responseTimeMs)) {
++      return NextResponse.json({ error: "Temps écoulé ! Ta réponse n'a pas été prise en compte.", code: "too_late" }, { status: 409 });
++    }
++
++    let basePoints = 0;
++    let bonusPoints = 0;
++    // accuracy : 1 pour une bonne réponse, entre 0 et 1 pour les points partiels.
++    const award = (accuracy: number) => {
++      const score = computeScore(question.points, question.timeLimit, responseTimeMs ?? question.timeLimit * 1000, accuracy);
++      basePoints = score.base;
++      bonusPoints = score.bonus;
++      return score.total;
++    };
++
+     const config = (question.config ?? {}) as Record<string, any>;
+     let savedAnswerId: string | null = null;
+     let savedAnswerText: string | null = null;
+@@ -52,7 +73,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+       if (!exists || typeof config.correctAnswerId !== "string") return NextResponse.json({ error: "La configuration de cette question est invalide." }, { status: 400 });
+       savedAnswerId = answerId;
+       isCorrect = answerId === config.correctAnswerId;
+-      pointsAwarded = isCorrect ? question.points : 0;
++      pointsAwarded = isCorrect ? award(1) : 0;
+     } else if (question.type === "free_text" || question.type === "image_guess" || question.type === "audio_guess") {
+       if (!answerText?.trim()) return NextResponse.json({ error: "Écris une réponse avant de l'envoyer." }, { status: 400 });
+       savedAnswerText = answerText.trim();
+@@ -67,7 +88,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+       }
+       savedAnswerText = String(parsed.data);
+       const ratio = Math.max(0, 1 - Math.abs(parsed.data - target) / (max - min));
+-      pointsAwarded = Math.round(question.points * ratio);
++      pointsAwarded = award(ratio);
+       isCorrect = parsed.data === target;
+     } else if (question.type === "closest_wins") {
+       const parsed = numeric.safeParse(answerText);
+@@ -91,7 +112,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+       const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(point.lat)) * Math.cos(rad(targetLat)) * Math.sin(dLng / 2) ** 2;
+       const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+       // Full points within 1 km, then decrease progressively until 2,000 km.
+-      pointsAwarded = Math.round(question.points * Math.max(0, 1 - Math.max(0, distanceKm - 1) / 2000));
++      pointsAwarded = award(Math.max(0, 1 - Math.max(0, distanceKm - 1) / 2000));
+       isCorrect = distanceKm <= 1;
+     } else if (question.type === "ordering") {
+       if (!answerText) return NextResponse.json({ error: "Remets les éléments dans l'ordre avant de valider." }, { status: 400 });
+@@ -102,7 +123,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+       if (order.length !== correctOrder.length || new Set(order).size !== order.length || order.some(id => !correctOrder.includes(id))) return NextResponse.json({ error: "La liste d'éléments est invalide." }, { status: 400 });
+       savedAnswerText = JSON.stringify(order);
+       const correctPositions = order.filter((id, index) => id === correctOrder[index]).length;
+-      pointsAwarded = Math.round(question.points * correctPositions / correctOrder.length);
++      pointsAwarded = award(correctPositions / correctOrder.length);
+       isCorrect = correctPositions === correctOrder.length;
+     } else {
+       return NextResponse.json({ error: "Ce type de question n'est pas pris en charge." }, { status: 400 });
+@@ -110,7 +131,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+ 
+     const inserted = await db.insert(gameAnswers).values({
+       gameId, playerId, questionId: question.id, answerId: savedAnswerId,
+-      answerText: savedAnswerText, isCorrect, pointsAwarded,
++      answerText: savedAnswerText, isCorrect, pointsAwarded, responseTimeMs,
+     }).onConflictDoNothing().returning({ id: gameAnswers.id });
+     if (!inserted.length) return NextResponse.json({ error: "Tu as déjà répondu à cette question." }, { status: 409 });
+ 
+@@ -122,7 +143,7 @@ export async function POST(request: Request, { params }: RouteContext) {
+       message: pendingReview ? "Réponse envoyée ! En attente de la correction de l'organisateur."
+         : pointsAwarded > 0 ? `Réponse enregistrée ! +${pointsAwarded} points.`
+         : "Réponse enregistrée.",
+-      pointsAwarded,
++      pointsAwarded, isCorrect, basePoints, bonusPoints, responseTimeMs,
+     });
+   } catch (error) {
+     console.error("Erreur lors de l'enregistrement de la réponse :", error);
+diff --git a/app/api/games/[id]/answers/route.ts b/app/api/games/[id]/answers/route.ts
+index 392ebd5..1d7afb4 100644
+--- a/app/api/games/[id]/answers/route.ts
++++ b/app/api/games/[id]/answers/route.ts
+@@ -5,6 +5,10 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
+ import { z } from "zod";
+ 
+ import { db } from "@/lib/db";
++import { computeScore } from "@/lib/scoring";
++
++// closest_wins est départagé par l'organisateur : pas de bonus de rapidité.
++const SPEED_BONUS_TYPES = new Set(["free_text", "image_guess", "audio_guess"]);
+ import {
+   gameAnswers,
+   gamePlayers,
+@@ -65,6 +69,9 @@ export async function GET(
+         questionTitle: questions.title,
+         answerText: gameAnswers.answerText,
+         points: questions.points,
++        type: questions.type,
++        timeLimit: questions.timeLimit,
++        responseTimeMs: gameAnswers.responseTimeMs,
+         answeredAt: gameAnswers.answeredAt,
+       })
+       .from(gameAnswers)
+@@ -84,7 +91,22 @@ export async function GET(
+       )
+       .orderBy(asc(gameAnswers.answeredAt));
+ 
+-    return NextResponse.json({ answers: pending });
++    // Points que la réponse rapportera si elle est validée (bonus de rapidité inclus).
++    const answers = pending.map(
++      ({ timeLimit, responseTimeMs, type, ...answer }) => ({
++        ...answer,
++        responseTimeMs,
++        points: SPEED_BONUS_TYPES.has(type)
++          ? computeScore(
++              answer.points,
++              timeLimit,
++              responseTimeMs ?? timeLimit * 1000,
++            ).total
++          : answer.points,
++      }),
++    );
++
++    return NextResponse.json({ answers });
+   } catch (error) {
+     console.error("Erreur de récupération des réponses :", error);
+ 
+@@ -132,6 +154,9 @@ export async function PATCH(
+         playerId: gameAnswers.playerId,
+         questionId: gameAnswers.questionId,
+         points: questions.points,
++        type: questions.type,
++        timeLimit: questions.timeLimit,
++        responseTimeMs: gameAnswers.responseTimeMs,
+       })
+       .from(gameAnswers)
+       .innerJoin(
+@@ -154,7 +179,15 @@ export async function PATCH(
+       );
+     }
+ 
+-    const pointsAwarded = correct ? pending.points : 0;
++    const pointsAwarded = !correct
++      ? 0
++      : SPEED_BONUS_TYPES.has(pending.type)
++        ? computeScore(
++            pending.points,
++            pending.timeLimit,
++            pending.responseTimeMs ?? pending.timeLimit * 1000,
++          ).total
++        : pending.points;
+ 
+     // Une seule correction peut gagner cette mise à jour.
+     const [reviewed] = await db
+diff --git a/app/api/games/[id]/next/route.ts b/app/api/games/[id]/next/route.ts
+index 866bf2f..f5e986f 100644
+--- a/app/api/games/[id]/next/route.ts
++++ b/app/api/games/[id]/next/route.ts
+@@ -1,23 +1,23 @@
+-
+ import { NextResponse } from "next/server";
+ import { createHash, timingSafeEqual } from "node:crypto";
+-import { asc, eq } from "drizzle-orm";
++import { and, eq, sql } from "drizzle-orm";
+ 
+ import { db } from "@/lib/db";
+ import { gameSessions, questions } from "@/lib/db/schema";
+ 
+-export async function POST(
+-  request: Request,
+-  { params }: { params: Promise<{ id: string }> }
+-) {
++type RouteContext = {
++  params: Promise<{ id: string }>;
++};
++
++export async function POST(request: Request, { params }: RouteContext) {
+   try {
+     const { id } = await params;
+-    const token = request.headers.get("x-host-token");
++    const hostToken = request.headers.get("x-host-token");
+ 
+-    if (!token) {
++    if (!hostToken || hostToken.length > 200) {
+       return NextResponse.json(
+-        { error: "Jeton organisateur manquant." },
+-        { status: 401 }
++        { error: "Autorisation organisateur manquante." },
++        { status: 401 },
+       );
+     }
+ 
+@@ -28,65 +28,73 @@ export async function POST(
+       .limit(1);
+ 
+     if (!game) {
+-      return NextResponse.json(
+-        { error: "Partie introuvable." },
+-        { status: 404 }
+-      );
++      return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
+     }
+ 
+-    const suppliedHash = createHash("sha256").update(token).digest();
++    const suppliedHash = createHash("sha256").update(hostToken).digest();
+     const storedHash = Buffer.from(game.hostTokenHash, "hex");
+ 
+     if (
+-      storedHash.length !== suppliedHash.length ||
+-      !timingSafeEqual(storedHash, suppliedHash)
++      suppliedHash.length !== storedHash.length ||
++      !timingSafeEqual(suppliedHash, storedHash)
+     ) {
+       return NextResponse.json(
+-        { error: "Jeton organisateur invalide." },
+-        { status: 403 }
++        { error: "Tu n'es pas autorisé à piloter cette partie." },
++        { status: 403 },
+       );
+     }
+ 
+     if (game.status !== "playing") {
+       return NextResponse.json(
+-        { error: "La partie n'est pas en cours." },
+-        { status: 409 }
++        { error: "Cette partie n'est pas en cours." },
++        { status: 409 },
+       );
+     }
+ 
+-    const allQuestions = await db
+-      .select({ id: questions.id })
++    const [{ total }] = await db
++      .select({ total: sql<number>`count(*)::int` })
+       .from(questions)
+-      .where(eq(questions.quizId, game.quizId))
+-      .orderBy(asc(questions.position));
+-
+-    const nextIndex = game.currentQuestionIndex + 1;
++      .where(eq(questions.quizId, game.quizId));
+ 
+-    if (nextIndex >= allQuestions.length) {
+-      await db
+-        .update(gameSessions)
+-        .set({ status: "finished" })
+-        .where(eq(gameSessions.id, id));
++    const isLast = game.currentQuestionIndex + 1 >= total;
+ 
+-      return NextResponse.json({ success: true, finished: true });
+-    }
+-
+-    await db
++    // La condition sur l'index évite qu'un double clic saute deux questions.
++    const [updated] = await db
+       .update(gameSessions)
+-      .set({ currentQuestionIndex: nextIndex })
+-      .where(eq(gameSessions.id, id));
++      .set(
++        isLast
++          ? { status: "finished" }
++          : {
++              currentQuestionIndex: game.currentQuestionIndex + 1,
++              questionStartedAt: new Date(),
++            },
++      )
++      .where(
++        and(
++          eq(gameSessions.id, id),
++          eq(gameSessions.status, "playing"),
++          eq(gameSessions.currentQuestionIndex, game.currentQuestionIndex),
++        ),
++      )
++      .returning({
++        status: gameSessions.status,
++        currentQuestionIndex: gameSessions.currentQuestionIndex,
++      });
++
++    if (!updated) {
++      return NextResponse.json(
++        { error: "La question a déjà changé." },
++        { status: 409 },
++      );
++    }
+ 
+-    return NextResponse.json({
+-      success: true,
+-      finished: false,
+-      currentQuestionIndex: nextIndex,
+-    });
++    return NextResponse.json({ game: updated, finished: isLast });
+   } catch (error) {
+-    console.error(error);
++    console.error("Erreur passage à la question suivante :", error);
+ 
+     return NextResponse.json(
+-      { error: "Impossible de passer à la question suivante." },
+-      { status: 500 }
++      { error: "Impossible de passer à la suite." },
++      { status: 500 },
+     );
+   }
+ }
+diff --git a/app/api/games/[id]/route.ts b/app/api/games/[id]/route.ts
+index 080549f..0bf75fc 100644
+--- a/app/api/games/[id]/route.ts
++++ b/app/api/games/[id]/route.ts
+@@ -1,5 +1,5 @@
+ import { NextResponse } from "next/server";
+-import { and, asc, eq } from "drizzle-orm";
++import { and, asc, eq, sql } from "drizzle-orm";
+ import { db } from "@/lib/db";
+ import { gameAnswers, gamePlayers, gameSessions, questions } from "@/lib/db/schema";
+ 
+@@ -11,6 +11,7 @@ export async function GET(request: Request, { params }: RouteContext) {
+     const [game] = await db.select({
+       id: gameSessions.id, pin: gameSessions.pin, status: gameSessions.status,
+       quizId: gameSessions.quizId, currentQuestionIndex: gameSessions.currentQuestionIndex,
++      questionStartedAt: gameSessions.questionStartedAt,
+     }).from(gameSessions).where(eq(gameSessions.id, id)).limit(1);
+     if (!game) return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
+ 
+@@ -71,7 +72,18 @@ export async function GET(request: Request, { params }: RouteContext) {
+         };
+       }
+     }
+-    return NextResponse.json({ game, players, currentQuestion });
++
++    const [{ total }] = await db.select({ total: sql<number>`count(*)::int` })
++      .from(questions).where(eq(questions.quizId, game.quizId));
++
++    return NextResponse.json({
++      game: { ...game, questionStartedAt: game.questionStartedAt?.toISOString() ?? null },
++      players,
++      currentQuestion,
++      totalQuestions: total,
++      // Sert au client pour corriger le décalage entre son horloge et celle du serveur.
++      serverNow: new Date().toISOString(),
++    });
+   } catch (error) {
+     console.error("Erreur récupération partie :", error);
+     return NextResponse.json({ error: "Impossible de récupérer cette partie." }, { status: 500 });
+diff --git a/app/api/games/[id]/start/route.ts b/app/api/games/[id]/start/route.ts
+index 7f87d19..79b054c 100644
+--- a/app/api/games/[id]/start/route.ts
++++ b/app/api/games/[id]/start/route.ts
+@@ -79,6 +79,7 @@ export async function POST(
+       .set({
+         status: "playing",
+         currentQuestionIndex: 0,
++        questionStartedAt: new Date(),
+       })
+       .where(eq(gameSessions.id, id))
+       .returning({
+diff --git a/app/game/[id]/page.tsx b/app/game/[id]/page.tsx
+index f137da3..e176aa5 100644
+--- a/app/game/[id]/page.tsx
++++ b/app/game/[id]/page.tsx
+@@ -5,6 +5,12 @@ import { Suspense, useCallback, useEffect, useState } from "react";
+ import { useParams, useSearchParams } from "next/navigation";
+ import { Copy, Users, Clock3, RefreshCw } from "lucide-react";
+ import dynamic from "next/dynamic";
++import { ArrowRight } from "lucide-react";
++import { AnimatePresence, MotionConfig, motion } from "framer-motion";
++import { CountdownRing } from "@/components/game/CountdownRing";
++import { ScoreBurst } from "@/components/game/ScoreBurst";
++import { Leaderboard, rankPlayers } from "@/components/game/Leaderboard";
++import { Podium } from "@/components/game/Podium";
+ 
+ const MapPicker = dynamic(
+   () => import("@/components/maps/MapPicker"),
+@@ -29,6 +35,14 @@ type Game = {
+   pin: string;
+   status: string;
+   quizId: string;
++  currentQuestionIndex: number;
++  questionStartedAt: string | null;
++};
++
++type AnswerResult = {
++  isCorrect: boolean | null;
++  pointsAwarded: number;
++  bonusPoints: number;
+ };
+ 
+ type PublicQuestion = {
+@@ -75,6 +89,11 @@ const [selectedAnswerId, setSelectedAnswerId] = useState("");
+ const [hasAnswered, setHasAnswered] = useState(false);
+ const [answerFeedback, setAnswerFeedback] = useState("");
+ const [submittingAnswer, setSubmittingAnswer] = useState(false);
++const [totalQuestions, setTotalQuestions] = useState(0);
++const [serverOffsetMs, setServerOffsetMs] = useState(0);
++const [timeUp, setTimeUp] = useState(false);
++const [answerResult, setAnswerResult] = useState<AnswerResult | null>(null);
++const [advancing, setAdvancing] = useState(false);
+   const [game, setGame] = useState<Game | null>(null);
+   const [players, setPlayers] = useState<Player[]>([]);
+   const [loading, setLoading] = useState(true);
+@@ -106,6 +125,14 @@ useEffect(() => {
+       }
+ 
+       setGame(data.game);
++      setTotalQuestions(data.totalQuestions ?? 0);
++
++      if (data.serverNow) {
++        const offset = new Date(data.serverNow).getTime() - Date.now();
++        setServerOffsetMs((previous) =>
++          Math.abs(previous - offset) < 150 ? previous : offset,
++        );
++      }
+       setPlayers(data.players);
+ setCurrentQuestion(data.currentQuestion ?? null);
+ setHasAnswered(Boolean(data.currentQuestion?.hasAnswered));
+@@ -132,6 +159,7 @@ async function nextQuestion() {
+     return;
+   }
+ 
++  setAdvancing(true);
+   setStartError("");
+ 
+   try {
+@@ -157,6 +185,8 @@ async function nextQuestion() {
+         ? error.message
+         : "Une erreur est survenue."
+     );
++  } finally {
++    setAdvancing(false);
+   }
+ }
+ 
+@@ -227,6 +257,9 @@ const loadPendingAnswers = useCallback(async () => {
+   }
+ }, [gameId]);
+ 
++// Rafraîchissement plus rapide en cours de partie pour suivre les changements de question.
++const pollMs = game?.status === "playing" ? 1500 : 3000;
++
+ useEffect(() => {
+   void loadGame();
+   void loadPendingAnswers();
+@@ -234,10 +267,10 @@ useEffect(() => {
+   const interval = window.setInterval(() => {
+     void loadGame();
+     void loadPendingAnswers();
+-  }, 3000);
++  }, pollMs);
+ 
+   return () => window.clearInterval(interval);
+-}, [loadGame, loadPendingAnswers]);
++}, [loadGame, loadPendingAnswers, pollMs]);
+ 
+ 
+   async function copyPin() {
+@@ -288,11 +321,20 @@ if (currentQuestion.type === "ordering" && orderIds.length === 0) return;
+         setHasAnswered(true);
+         setFreeText("");
+       }
++
++      if (data.code === "too_late") {
++        setTimeUp(true);
++      }
+       throw new Error(data.error || "Impossible d'envoyer ta réponse.");
+     }
+ 
+     setHasAnswered(true);
+     setAnswerFeedback(data.message);
++    setAnswerResult({
++      isCorrect: data.isCorrect ?? null,
++      pointsAwarded: data.pointsAwarded ?? 0,
++      bonusPoints: data.bonusPoints ?? 0,
++    });
+     await loadGame();
+   } catch (err) {
+     setAnswerFeedback(
+@@ -310,6 +352,8 @@ useEffect(() => {
+   setNumericAnswer(currentQuestion?.config.min ?? 0);
+   const items = currentQuestion?.config.items ?? [];
+   setOrderIds(items.map(item => item.id).sort(() => Math.random() - 0.5));
++  setAnswerResult(null);
++  setTimeUp(false);
+   setHasAnswered(Boolean(currentQuestion?.hasAnswered));
+ }, [currentQuestion?.id]);
+ 
+@@ -386,7 +430,10 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+ 
+   if (!game) return null;
+ 
++  const rankedPlayers = rankPlayers(players);
++
+   return (
++    <MotionConfig reducedMotion="user">
+     <main className="min-h-screen bg-[#171323] px-5 py-8 text-white sm:px-8">
+       <div className="mx-auto max-w-5xl">
+         <header className="flex items-center justify-between">
+@@ -400,7 +447,9 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+           </div>
+         </header>
+ 
+-        <section className="py-12 text-center sm:py-16">
++        {game.status === "waiting" && (
++<>
++<section className="py-12 text-center sm:py-16">
+           <p className="text-sm font-bold uppercase tracking-[0.25em] text-[#c4b5fd]">
+             Rejoins la partie
+           </p>
+@@ -479,8 +528,11 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+           ) : (
+             <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+               {players.map((player, index) => (
+-                <div
++                <motion.div
+                   key={player.id}
++                  initial={{ opacity: 0, scale: 0.8, y: 12 }}
++                  animate={{ opacity: 1, scale: 1, y: 0 }}
++                  transition={{ type: "spring", stiffness: 360, damping: 22 }}
+                   className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/10 p-4"
+                 >
+                   <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#8b5cf6]/20 font-black text-[#c4b5fd]">
+@@ -490,7 +542,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+                   <p className="min-w-0 truncate font-semibold">
+                     {player.nickname}
+                   </p>
+-                </div>
++                </motion.div>
+               ))}
+             </div>
+           )}
+@@ -500,24 +552,86 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+             Actualisation toutes les 3 secondes
+           </p>
+         </section>
++</>
++)}
++
+ 
+      
+ <div className="mt-8 text-center">
+-  {game.status === "playing" && currentQuestion ? (
+-    <section className="mx-auto max-w-2xl rounded-3xl border border-[#8b5cf6]/40 bg-white/5 p-6 text-left sm:p-8">
+-      <p className="text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
+-        Question {currentQuestion.position + 1}
+-      </p>
++  {game.status === "finished" ? (
++    <motion.section
++      initial={{ opacity: 0, y: 20 }}
++      animate={{ opacity: 1, y: 0 }}
++      className="mx-auto max-w-2xl text-center"
++    >
++      <h2 className="text-4xl font-black sm:text-5xl">Fin de la partie !</h2>
++      <p className="mt-3 text-white/60">Voici le classement final.</p>
++
++      <div className="mt-10">
++        <Podium players={players} />
++      </div>
++
++      {rankedPlayers.length > 3 && (
++        <div className="mt-10 text-left">
++          <Leaderboard
++            players={rankedPlayers.slice(3)}
++            highlightId={playerId}
++            rankOffset={3}
++          />
++        </div>
++      )}
++    </motion.section>
++  ) : game.status === "playing" && currentQuestion ? (
++    <motion.section
++      key={currentQuestion.id}
++      initial={{ opacity: 0, x: 40 }}
++      animate={{ opacity: 1, x: 0 }}
++      transition={{ type: "spring", stiffness: 260, damping: 26 }}
++      className="mx-auto max-w-2xl rounded-3xl border border-[#8b5cf6]/40 bg-white/5 p-6 text-left sm:p-8"
++    >
++      <div className="flex items-start justify-between gap-4">
++        <div className="min-w-0">
++          <p className="text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
++            Question {game.currentQuestionIndex + 1}
++            {totalQuestions > 0 && ` / ${totalQuestions}`}
++          </p>
++
++          <h2 className="mt-4 text-2xl font-black sm:text-3xl">
++            {currentQuestion.title}
++          </h2>
+ 
+-      <h2 className="mt-4 text-2xl font-black sm:text-3xl">
+-        {currentQuestion.title}
+-      </h2>
++          <div className="mt-4 flex gap-4 text-sm text-white/50">
++            <span>{currentQuestion.timeLimit} secondes</span>
++            <span>jusqu’à {currentQuestion.points} points</span>
++          </div>
++        </div>
+ 
+-      <div className="mt-4 flex gap-4 text-sm text-white/50">
+-        <span>{currentQuestion.timeLimit} secondes</span>
+-        <span>{currentQuestion.points} points</span>
++        <CountdownRing
++          startedAt={game.questionStartedAt}
++          timeLimit={currentQuestion.timeLimit}
++          serverOffsetMs={serverOffsetMs}
++          onExpire={() => setTimeUp(true)}
++        />
+       </div>
+ 
++      <p className="mt-3 text-xs text-white/40">
++        Plus tu réponds vite, plus tu gagnes de points (jusqu’à 2× les points de base).
++      </p>
++
++      <AnimatePresence>
++        {timeUp && !hasAnswered && !isHost && (
++          <motion.p
++            initial={{ opacity: 0, scale: 0.9 }}
++            animate={{ opacity: 1, scale: 1 }}
++            exit={{ opacity: 0 }}
++            role="status"
++            className="mt-4 rounded-xl bg-[#fb7185]/15 px-4 py-3 text-center font-bold text-[#fb7185]"
++          >
++            ⏰ Temps écoulé !
++          </motion.p>
++        )}
++      </AnimatePresence>
++
+      
+ {currentQuestion.config.answers && (
+   <div className="mt-6 grid gap-3 sm:grid-cols-2">
+@@ -525,17 +639,42 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+       const selected = selectedAnswerId === answer.id;
+ 
+       return (
+-        <button
++        <motion.button
+           key={answer.id}
+           type="button"
+-          disabled={isHost || hasAnswered || submittingAnswer || !playerId}
++          disabled={
++            isHost || hasAnswered || submittingAnswer || !playerId || timeUp
++          }
+           onClick={() => setSelectedAnswerId(answer.id)}
+-          className={`rounded-xl border p-4 text-left font-semibold transition ${
+-            selected
+-              ? "border-[#c4b5fd] bg-[#8b5cf6]/30"
+-              : "border-white/10 bg-white/5"
++          initial={{ opacity: 0, y: 16 }}
++          animate={
++            selected && answerResult && answerResult.isCorrect !== null
++              ? answerResult.isCorrect
++                ? { opacity: 1, y: 0, scale: [1, 1.06, 1] }
++                : { opacity: 1, y: 0, x: [0, -8, 8, -6, 6, 0] }
++              : {
++                  opacity: hasAnswered && !selected ? 0.45 : 1,
++                  y: 0,
++                  scale: selected ? 1.02 : 1,
++                }
++          }
++          transition={{ delay: hasAnswered ? 0 : index * 0.07, duration: 0.4 }}
++          whileHover={
++            !isHost && !hasAnswered && !timeUp ? { scale: 1.02 } : undefined
++          }
++          whileTap={
++            !isHost && !hasAnswered && !timeUp ? { scale: 0.97 } : undefined
++          }
++          className={`rounded-xl border p-4 text-left font-semibold transition-colors ${
++            selected && answerResult?.isCorrect === true
++              ? "border-emerald-400 bg-emerald-500/25"
++              : selected && answerResult?.isCorrect === false
++                ? "border-[#fb7185] bg-[#fb7185]/20"
++                : selected
++                  ? "border-[#c4b5fd] bg-[#8b5cf6]/30"
++                  : "border-white/10 bg-white/5"
+           } ${
+-            !isHost && !hasAnswered
++            !isHost && !hasAnswered && !timeUp
+               ? "hover:border-[#c4b5fd]/60 hover:bg-white/10"
+               : ""
+           } disabled:cursor-default`}
+@@ -544,7 +683,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+             {String.fromCharCode(65 + index)}
+           </span>
+           {answer.text}
+-        </button>
++        </motion.button>
+       );
+     })}
+   </div>
+@@ -571,7 +710,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+       onChange={(event) => setFreeText(event.target.value)}
+       maxLength={2000}
+       rows={3}
+-      disabled={hasAnswered || submittingAnswer || !playerId}
++      disabled={hasAnswered || submittingAnswer || !playerId || timeUp}
+       placeholder="Écris ta réponse ici..."
+       className="w-full resize-y rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none placeholder:text-white/30 focus:border-[#c4b5fd] disabled:opacity-50"
+     />
+@@ -580,7 +719,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+       <button
+         type="button"
+         onClick={() => void submitAnswer()}
+-        disabled={!freeText.trim() || submittingAnswer || !playerId}
++        disabled={!freeText.trim() || submittingAnswer || !playerId || timeUp}
+         className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] transition hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-40"
+       >
+         {submittingAnswer ? "Envoi..." : "Envoyer ma réponse"}
+@@ -604,26 +743,26 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+ {!isHost && currentQuestion.type === "slider" && (
+   <div className="mt-6 space-y-3">
+     <div className="flex justify-between text-sm text-white/50"><span>{currentQuestion.config.min}</span><span>{currentQuestion.config.max}</span></div>
+-    <input type="range" min={currentQuestion.config.min ?? 0} max={currentQuestion.config.max ?? 100} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full accent-[#facc15]" />
++    <input type="range" min={currentQuestion.config.min ?? 0} max={currentQuestion.config.max ?? 100} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId || timeUp} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full accent-[#facc15]" />
+     <p className="text-center text-3xl font-black text-[#facc15]">{numericAnswer}</p>
+-    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider ma réponse"}</button>}
++    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId || timeUp} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider ma réponse"}</button>}
+   </div>
+ )}
+ 
+ {!isHost && currentQuestion.type === "closest_wins" && (
+   <div className="mt-6">
+     <label className="mb-2 block text-sm font-bold text-white/70">Ta estimation</label>
+-    <input type="number" min={currentQuestion.config.min} max={currentQuestion.config.max} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none focus:border-[#c4b5fd] disabled:opacity-50" />
+-    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Envoyer mon estimation"}</button>}
++    <input type="number" min={currentQuestion.config.min} max={currentQuestion.config.max} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId || timeUp} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none focus:border-[#c4b5fd] disabled:opacity-50" />
++    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId || timeUp} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Envoyer mon estimation"}</button>}
+   </div>
+ )}
+ 
+ {!isHost && currentQuestion.type === "pin" && (
+   <div className="mt-6 space-y-3">
+     <p className="text-sm text-white/60">Zoome et déplace la carte, puis clique sur l'endroit que tu penses correct.</p>
+-    <MapPicker value={selectedPoint} onChange={setSelectedPoint} disabled={hasAnswered || submittingAnswer || !playerId} center={[20, 0]} zoom={2} />
++    <MapPicker value={selectedPoint} onChange={setSelectedPoint} disabled={hasAnswered || submittingAnswer || !playerId || timeUp} center={[20, 0]} zoom={2} />
+     {selectedPoint && <p className="text-xs text-white/50">Position choisie : {selectedPoint.lat.toFixed(3)}, {selectedPoint.lng.toFixed(3)}</p>}
+-    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={!selectedPoint || submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider la position"}</button>}
++    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={!selectedPoint || submittingAnswer || !playerId || timeUp} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider la position"}</button>}
+   </div>
+ )}
+ 
+@@ -633,19 +772,40 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+     {orderIds.map((id, index) => {
+       const item = currentQuestion.config.items?.find(entry => entry.id === id);
+       if (!item) return null;
+-      return <div key={id} className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 p-3"><span className="flex-1">{item.text}</span><button type="button" disabled={index === 0 || hasAnswered || submittingAnswer} onClick={() => setOrderIds(current => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Monter">↑</button><button type="button" disabled={index === orderIds.length - 1 || hasAnswered || submittingAnswer} onClick={() => setOrderIds(current => { const next = [...current]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Descendre">↓</button></div>;
++      return <div key={id} className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 p-3"><span className="flex-1">{item.text}</span><button type="button" disabled={index === 0 || hasAnswered || submittingAnswer || timeUp} onClick={() => setOrderIds(current => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Monter">↑</button><button type="button" disabled={index === orderIds.length - 1 || hasAnswered || submittingAnswer || timeUp} onClick={() => setOrderIds(current => { const next = [...current]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next; })} className="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30" aria-label="Descendre">↓</button></div>;
+     })}
+-    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider l'ordre"}</button>}
++    {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId || timeUp} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider l'ordre"}</button>}
+   </div>
+ )}
+ 
++{!isHost && (
++  <>
++    <AnimatePresence>
++      {answerResult && answerResult.pointsAwarded > 0 && (
++        <ScoreBurst
++          total={answerResult.pointsAwarded}
++          bonus={answerResult.bonusPoints}
++          label={answerResult.isCorrect ? "Bonne réponse !" : "Bien joué !"}
++        />
++      )}
++    </AnimatePresence>
++
++    {answerFeedback &&
++      !currentQuestion.config.answers &&
++      !["free_text", "image_guess", "audio_guess"].includes(currentQuestion.type) &&
++      !(answerResult && answerResult.pointsAwarded > 0) && (
++        <p role="status" className="mt-4 text-center font-bold text-[#facc15]">
++          {answerFeedback}
++        </p>
++      )}
++  </>
++)}
++
+ {isHost && (
+   <div className="mt-8 border-t border-white/10 pt-6">
+-    <div className="flex flex-wrap items-center justify-between gap-3">
+-      <h3 className="text-xl font-black">Réponses à corriger ({pendingAnswers.length})</h3>
+-      <button type="button" onClick={() => void nextQuestion()} className="rounded-xl bg-[#8b5cf6] px-4 py-3 font-bold text-white transition hover:bg-[#7c3aed]">Question suivante →</button>
+-    </div>
+-    {startError && <p role="alert" className="mt-3 text-sm text-red-300">{startError}</p>}
++    <h3 className="text-xl font-black">
++      Réponses à corriger ({pendingAnswers.length})
++    </h3>
+ 
+     <p className="mt-2 text-sm text-white/50">
+       Valide chaque réponse pour attribuer les points.
+@@ -714,17 +874,22 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+       <button
+         type="button"
+         onClick={() => void submitAnswer()}
+-        disabled={!selectedAnswerId || submittingAnswer}
++        disabled={!selectedAnswerId || submittingAnswer || timeUp}
+         className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] transition hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-40"
+       >
+         {submittingAnswer ? "Envoi..." : "Valider ma réponse"}
+       </button>
+     )}
+ 
+-    {answerFeedback && (
+-      <p role="status" className="mt-4 text-center font-bold text-[#facc15]">
++    {answerFeedback && !answerResult?.isCorrect && (
++      <motion.p
++        initial={{ opacity: 0, y: 8 }}
++        animate={{ opacity: 1, y: 0 }}
++        role="status"
++        className="mt-4 text-center font-bold text-[#facc15]"
++      >
+         {answerFeedback}
+-      </p>
++      </motion.p>
+     )}
+ 
+     {hasAnswered && !answerFeedback && (
+@@ -735,36 +900,37 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+   </div>
+ )}
+ 
+-{isHost && game?.status === "playing" && (
+-  <div className="mt-6">
+-    <button
+-      type="button"
+-      onClick={() => void nextQuestion()}
+-      className="rounded-xl bg-violet-600 px-6 py-3 font-bold text-white transition hover:bg-violet-700"
+-    >
+-      Question suivante →
+-    </button>
+-
+-    {startError && (
+-      <p className="mt-2 text-sm text-red-400" role="alert">
+-        {startError}
+-      </p>
+-    )}
+-  </div>
+-)}
++      {isHost && (
++        <div className="mt-8 border-t border-white/10 pt-6">
++          {startError && (
++            <p role="alert" className="mb-3 text-sm text-red-300">
++              {startError}
++            </p>
++          )}
+ 
+-      <p className="mt-6 text-sm text-white/40">Les réponses sont actualisées automatiquement.</p>
+-    </section>
++          <motion.button
++            type="button"
++            onClick={() => void nextQuestion()}
++            disabled={advancing}
++            animate={timeUp ? { scale: [1, 1.03, 1] } : { scale: 1 }}
++            transition={timeUp ? { duration: 1.2, repeat: Infinity } : undefined}
++            whileTap={{ scale: 0.97 }}
++            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] transition-colors hover:bg-yellow-300 disabled:opacity-50"
++          >
++            {advancing
++              ? "Chargement..."
++              : game.currentQuestionIndex + 1 >= totalQuestions
++                ? "Terminer le quiz"
++                : "Question suivante"}
++            <ArrowRight size={18} />
++          </motion.button>
++        </div>
++      )}
++    </motion.section>
+   ) : game.status === "playing" ? (
+     <p className="text-white/60">
+       Chargement de la question...
+     </p>
+-  ) : game.status === "finished" ? (
+-    <section className="mx-auto max-w-xl rounded-3xl border border-[#facc15]/30 bg-white/5 p-8 text-center">
+-      <h2 className="text-3xl font-black text-[#facc15]">Quiz terminé !</h2>
+-      <p className="mt-3 text-white/60">Merci d'avoir joué. Voici les scores finaux.</p>
+-      <div className="mt-5 space-y-2 text-left">{[...players].sort((a, b) => b.score - a.score).map((player, index) => <div key={player.id} className="flex items-center justify-between rounded-xl bg-black/20 p-3"><span>{index + 1}. {player.nickname}</span><strong className="text-[#facc15]">{player.score} pts</strong></div>)}</div>
+-    </section>
+   ) : isHost ? (
+     <>
+       <p className="text-sm text-white/50">
+@@ -792,8 +958,18 @@ async function reviewAnswer(answerId: string, correct: boolean) {
+     </p>
+   )}
+ </div>
++
++{game.status === "playing" && players.length > 0 && (
++  <section className="mx-auto mt-6 max-w-2xl text-left">
++    <h3 className="mb-3 text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
++      Classement
++    </h3>
++    <Leaderboard players={players} highlightId={playerId} limit={5} />
++  </section>
++)}
+       </div>
+     </main>
++    </MotionConfig>
+   );
+ }
+ 
+diff --git a/components/game/AnimatedNumber.tsx b/components/game/AnimatedNumber.tsx
+new file mode 100644
+index 0000000..a84a127
+--- /dev/null
++++ b/components/game/AnimatedNumber.tsx
+@@ -0,0 +1,23 @@
++"use client";
++
++import { useEffect, useRef, useState } from "react";
++import { animate } from "framer-motion";
++
++export function AnimatedNumber({ value }: { value: number }) {
++  const [display, setDisplay] = useState(value);
++  const previous = useRef(value);
++
++  useEffect(() => {
++    const controls = animate(previous.current, value, {
++      duration: 0.8,
++      ease: "easeOut",
++      onUpdate: (latest) => setDisplay(Math.round(latest)),
++    });
++
++    previous.current = value;
++
++    return () => controls.stop();
++  }, [value]);
++
++  return <span className="tabular-nums">{display}</span>;
++}
+diff --git a/components/game/CountdownRing.tsx b/components/game/CountdownRing.tsx
+new file mode 100644
+index 0000000..26b22e4
+--- /dev/null
++++ b/components/game/CountdownRing.tsx
+@@ -0,0 +1,116 @@
++"use client";
++
++import { useEffect, useRef, useState } from "react";
++import { motion } from "framer-motion";
++
++type CountdownRingProps = {
++  /** ISO du lancement de la question (horloge serveur). */
++  startedAt: string | null;
++  /** Durée de la question en secondes. */
++  timeLimit: number;
++  /** Décalage serveur - client en ms, pour afficher le bon temps restant. */
++  serverOffsetMs: number;
++  /** Appelé une seule fois quand le chrono atteint zéro. */
++  onExpire?: () => void;
++};
++
++const RADIUS = 44;
++const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
++
++function colorFor(ratio: number) {
++  if (ratio > 0.5) return "#2dd4bf";
++  if (ratio > 0.25) return "#fde047";
++  return "#fb7185";
++}
++
++export function CountdownRing({
++  startedAt,
++  timeLimit,
++  serverOffsetMs,
++  onExpire,
++}: CountdownRingProps) {
++  const totalMs = timeLimit * 1000;
++  const [remainingMs, setRemainingMs] = useState(totalMs);
++  const onExpireRef = useRef(onExpire);
++
++  useEffect(() => {
++    onExpireRef.current = onExpire;
++  }, [onExpire]);
++
++  useEffect(() => {
++    if (!startedAt) return;
++
++    const start = new Date(startedAt).getTime();
++    let frame = 0;
++    let expired = false;
++
++    const tick = () => {
++      const left = Math.max(
++        0,
++        start + totalMs - (Date.now() + serverOffsetMs),
++      );
++      setRemainingMs(left);
++
++      if (left <= 0) {
++        if (!expired) {
++          expired = true;
++          onExpireRef.current?.();
++        }
++        return;
++      }
++
++      frame = requestAnimationFrame(tick);
++    };
++
++    tick();
++
++    return () => cancelAnimationFrame(frame);
++  }, [startedAt, totalMs, serverOffsetMs]);
++
++  const ratio = Math.min(1, remainingMs / totalMs);
++  const seconds = Math.ceil(remainingMs / 1000);
++  const urgent = remainingMs > 0 && seconds <= 5;
++  const color = colorFor(ratio);
++
++  return (
++    <motion.div
++      className="relative h-24 w-24 shrink-0"
++      animate={urgent ? { scale: [1, 1.08, 1] } : { scale: 1 }}
++      transition={
++        urgent ? { duration: 1, repeat: Infinity, ease: "easeInOut" } : {}
++      }
++      role="timer"
++      aria-label={`${seconds} secondes restantes`}
++    >
++      <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
++        <circle
++          cx="50"
++          cy="50"
++          r={RADIUS}
++          fill="none"
++          stroke="rgba(255,255,255,0.1)"
++          strokeWidth="8"
++        />
++        <circle
++          cx="50"
++          cy="50"
++          r={RADIUS}
++          fill="none"
++          stroke={color}
++          strokeWidth="8"
++          strokeLinecap="round"
++          strokeDasharray={CIRCUMFERENCE}
++          strokeDashoffset={CIRCUMFERENCE * (1 - ratio)}
++          style={{ transition: "stroke 0.4s ease" }}
++        />
++      </svg>
++
++      <span
++        className="absolute inset-0 flex items-center justify-center text-3xl font-black tabular-nums"
++        style={{ color }}
++      >
++        {seconds}
++      </span>
++    </motion.div>
++  );
++}
+diff --git a/components/game/Leaderboard.tsx b/components/game/Leaderboard.tsx
+new file mode 100644
+index 0000000..6d47792
+--- /dev/null
++++ b/components/game/Leaderboard.tsx
+@@ -0,0 +1,82 @@
++"use client";
++
++import { AnimatePresence, motion } from "framer-motion";
++import { AnimatedNumber } from "./AnimatedNumber";
++
++type LeaderboardPlayer = {
++  id: string;
++  nickname: string;
++  score: number;
++};
++
++type LeaderboardProps = {
++  players: LeaderboardPlayer[];
++  highlightId?: string;
++  limit?: number;
++  /** Décalage du rang affiché (ex. 3 pour afficher à partir de la 4e place). */
++  rankOffset?: number;
++};
++
++export function rankPlayers<T extends LeaderboardPlayer>(players: T[]): T[] {
++  return [...players].sort(
++    (a, b) => b.score - a.score || a.nickname.localeCompare(b.nickname),
++  );
++}
++
++const MEDALS = ["🥇", "🥈", "🥉"];
++
++export function Leaderboard({
++  players,
++  highlightId,
++  limit,
++  rankOffset = 0,
++}: LeaderboardProps) {
++  const sorted = rankPlayers(players);
++  const visible = limit ? sorted.slice(0, limit) : sorted;
++
++  return (
++    <ul className="space-y-2">
++      <AnimatePresence initial={false}>
++        {visible.map((player, index) => {
++          const isMe = player.id === highlightId;
++
++          return (
++            <motion.li
++              key={player.id}
++              layout
++              initial={{ opacity: 0, x: -24 }}
++              animate={{ opacity: 1, x: 0 }}
++              exit={{ opacity: 0, x: 24 }}
++              transition={{
++                layout: { type: "spring", stiffness: 420, damping: 32 },
++                opacity: { duration: 0.2 },
++              }}
++              className={`flex items-center gap-3 rounded-2xl border p-3 ${
++                isMe
++                  ? "border-[#fde047]/60 bg-[#fde047]/10"
++                  : "border-white/10 bg-white/5"
++              }`}
++            >
++              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#7c3aed]/25 font-black text-[#c4b5fd]">
++                {MEDALS[index + rankOffset] ?? index + rankOffset + 1}
++              </span>
++
++              <span className="min-w-0 flex-1 truncate font-semibold">
++                {player.nickname}
++                {isMe && (
++                  <span className="ml-2 text-xs font-bold text-[#fde047]">
++                    toi
++                  </span>
++                )}
++              </span>
++
++              <span className="font-black text-[#fde047]">
++                <AnimatedNumber value={player.score} />
++              </span>
++            </motion.li>
++          );
++        })}
++      </AnimatePresence>
++    </ul>
++  );
++}
+diff --git a/components/game/Podium.tsx b/components/game/Podium.tsx
+new file mode 100644
+index 0000000..bc8d4d7
+--- /dev/null
++++ b/components/game/Podium.tsx
+@@ -0,0 +1,70 @@
++"use client";
++
++import { motion } from "framer-motion";
++import { Trophy } from "lucide-react";
++import { AnimatedNumber } from "./AnimatedNumber";
++import { rankPlayers } from "./Leaderboard";
++
++type PodiumPlayer = {
++  id: string;
++  nickname: string;
++  score: number;
++};
++
++// Ordre d'affichage : 2e, 1er, 3e. Le 1er est au centre et le plus haut.
++const SLOTS = [
++  { rank: 1, height: "h-28", color: "#c0c8d8", delay: 0.6 },
++  { rank: 0, height: "h-40", color: "#fde047", delay: 1.2 },
++  { rank: 2, height: "h-20", color: "#e0955a", delay: 0.0 },
++];
++
++export function Podium({ players }: { players: PodiumPlayer[] }) {
++  const sorted = rankPlayers(players);
++
++  return (
++    <div className="mx-auto flex max-w-md items-end justify-center gap-3">
++      {SLOTS.map(({ rank, height, color, delay }) => {
++        const player = sorted[rank];
++
++        if (!player) return <div key={rank} className="w-1/3" />;
++
++        return (
++          <div key={rank} className="flex w-1/3 flex-col items-center">
++            <motion.div
++              initial={{ opacity: 0, y: -30 }}
++              animate={{ opacity: 1, y: 0 }}
++              transition={{ delay: delay + 0.5, type: "spring", stiffness: 300, damping: 16 }}
++              className="mb-2 text-center"
++            >
++              {rank === 0 && (
++                <motion.div
++                  animate={{ rotate: [-8, 8, -8] }}
++                  transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
++                  className="mb-1 flex justify-center text-[#fde047]"
++                >
++                  <Trophy size={30} />
++                </motion.div>
++              )}
++              <p className="max-w-full truncate text-sm font-bold">
++                {player.nickname}
++              </p>
++              <p className="text-sm font-black" style={{ color }}>
++                <AnimatedNumber value={player.score} />
++              </p>
++            </motion.div>
++
++            <motion.div
++              initial={{ scaleY: 0 }}
++              animate={{ scaleY: 1 }}
++              transition={{ delay, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
++              style={{ originY: 1, backgroundColor: color }}
++              className={`flex w-full items-start justify-center rounded-t-2xl pt-2 text-2xl font-black text-[#130b2b] ${height}`}
++            >
++              {rank + 1}
++            </motion.div>
++          </div>
++        );
++      })}
++    </div>
++  );
++}
+diff --git a/components/game/ScoreBurst.tsx b/components/game/ScoreBurst.tsx
+new file mode 100644
+index 0000000..3e78b59
+--- /dev/null
++++ b/components/game/ScoreBurst.tsx
+@@ -0,0 +1,78 @@
++"use client";
++
++import { motion } from "framer-motion";
++import { Zap } from "lucide-react";
++
++type ScoreBurstProps = {
++  total: number;
++  bonus: number;
++  label?: string;
++};
++
++const COLORS = ["#fde047", "#2dd4bf", "#fb7185", "#c4b5fd", "#ffffff"];
++const PARTICLES = 20;
++
++export function ScoreBurst({
++  total,
++  bonus,
++  label = "Bonne réponse !",
++}: ScoreBurstProps) {
++  return (
++    <motion.div
++      initial={{ opacity: 0, scale: 0.4, y: 20 }}
++      animate={{ opacity: 1, scale: 1, y: 0 }}
++      transition={{ type: "spring", stiffness: 380, damping: 18 }}
++      className="relative mt-6 overflow-visible rounded-2xl border border-[#fde047]/30 bg-[#fde047]/10 p-5 text-center"
++    >
++      {/* Confettis : trajectoires déterministes pour rester pures au rendu. */}
++      <div className="pointer-events-none absolute left-1/2 top-1/2" aria-hidden>
++        {Array.from({ length: PARTICLES }, (_, i) => {
++          const angle = (i / PARTICLES) * Math.PI * 2;
++          const distance = 90 + (i % 4) * 22;
++
++          return (
++            <motion.span
++              key={i}
++              className="absolute block h-2 w-2 rounded-sm"
++              style={{ backgroundColor: COLORS[i % COLORS.length] }}
++              initial={{ x: 0, y: 0, opacity: 1, scale: 1, rotate: 0 }}
++              animate={{
++                x: Math.cos(angle) * distance,
++                y: Math.sin(angle) * distance + 24,
++                opacity: 0,
++                scale: 0.4,
++                rotate: 180 + i * 25,
++              }}
++              transition={{ duration: 1.1, ease: "easeOut" }}
++            />
++          );
++        })}
++      </div>
++
++      <motion.p
++        className="text-5xl font-black text-[#fde047]"
++        initial={{ scale: 0.6 }}
++        animate={{ scale: [0.6, 1.25, 1] }}
++        transition={{ duration: 0.5 }}
++      >
++        +{total}
++      </motion.p>
++
++      <p className="mt-1 text-sm font-semibold text-white/70">
++        {label}
++      </p>
++
++      {bonus > 0 && (
++        <motion.p
++          initial={{ opacity: 0, y: 8 }}
++          animate={{ opacity: 1, y: 0 }}
++          transition={{ delay: 0.35 }}
++          className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[#2dd4bf]/15 px-3 py-1 text-sm font-bold text-[#2dd4bf]"
++        >
++          <Zap size={14} />
++          dont +{bonus} de bonus de rapidité
++        </motion.p>
++      )}
++    </motion.div>
++  );
++}
+diff --git a/drizzle/0008_speed_bonus.sql b/drizzle/0008_speed_bonus.sql
+new file mode 100644
+index 0000000..69008be
+--- /dev/null
++++ b/drizzle/0008_speed_bonus.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE "game_answers" ADD COLUMN "response_time_ms" integer;--> statement-breakpoint
++ALTER TABLE "game_sessions" ADD COLUMN "question_started_at" timestamp;
+\ No newline at end of file
+diff --git a/drizzle/meta/0008_snapshot.json b/drizzle/meta/0008_snapshot.json
+new file mode 100644
+index 0000000..40efbb1
+--- /dev/null
++++ b/drizzle/meta/0008_snapshot.json
+@@ -0,0 +1,488 @@
++{
++  "id": "58fb1b0c-4892-4800-b548-4977eecd913a",
++  "prevId": "4a253721-8c79-409f-a604-6f7242c8f66e",
++  "version": "7",
++  "dialect": "postgresql",
++  "tables": {
++    "public.game_answers": {
++      "name": "game_answers",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true,
++          "default": "gen_random_uuid()"
++        },
++        "game_id": {
++          "name": "game_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "player_id": {
++          "name": "player_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "question_id": {
++          "name": "question_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "answer_id": {
++          "name": "answer_id",
++          "type": "varchar(100)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "answer_text": {
++          "name": "answer_text",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "is_correct": {
++          "name": "is_correct",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "points_awarded": {
++          "name": "points_awarded",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "response_time_ms": {
++          "name": "response_time_ms",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "answered_at": {
++          "name": "answered_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {
++        "game_answers_once_per_question": {
++          "name": "game_answers_once_per_question",
++          "columns": [
++            {
++              "expression": "game_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "player_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "question_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "game_answers_game_id_game_sessions_id_fk": {
++          "name": "game_answers_game_id_game_sessions_id_fk",
++          "tableFrom": "game_answers",
++          "tableTo": "game_sessions",
++          "columnsFrom": [
++            "game_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        },
++        "game_answers_player_id_game_players_id_fk": {
++          "name": "game_answers_player_id_game_players_id_fk",
++          "tableFrom": "game_answers",
++          "tableTo": "game_players",
++          "columnsFrom": [
++            "player_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        },
++        "game_answers_question_id_questions_id_fk": {
++          "name": "game_answers_question_id_questions_id_fk",
++          "tableFrom": "game_answers",
++          "tableTo": "questions",
++          "columnsFrom": [
++            "question_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.game_players": {
++      "name": "game_players",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true,
++          "default": "gen_random_uuid()"
++        },
++        "game_id": {
++          "name": "game_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "nickname": {
++          "name": "nickname",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "score": {
++          "name": "score",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "joined_at": {
++          "name": "joined_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {
++        "game_players_game_nickname_unique": {
++          "name": "game_players_game_nickname_unique",
++          "columns": [
++            {
++              "expression": "game_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "nickname",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "game_players_game_id_game_sessions_id_fk": {
++          "name": "game_players_game_id_game_sessions_id_fk",
++          "tableFrom": "game_players",
++          "tableTo": "game_sessions",
++          "columnsFrom": [
++            "game_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.game_sessions": {
++      "name": "game_sessions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true,
++          "default": "gen_random_uuid()"
++        },
++        "quiz_id": {
++          "name": "quiz_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "pin": {
++          "name": "pin",
++          "type": "varchar(6)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'waiting'"
++        },
++        "host_token_hash": {
++          "name": "host_token_hash",
++          "type": "varchar(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "current_question_index": {
++          "name": "current_question_index",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "question_started_at": {
++          "name": "question_started_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {
++        "game_sessions_pin_unique": {
++          "name": "game_sessions_pin_unique",
++          "columns": [
++            {
++              "expression": "pin",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "game_sessions_quiz_id_quizzes_id_fk": {
++          "name": "game_sessions_quiz_id_quizzes_id_fk",
++          "tableFrom": "game_sessions",
++          "tableTo": "quizzes",
++          "columnsFrom": [
++            "quiz_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.questions": {
++      "name": "questions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true,
++          "default": "gen_random_uuid()"
++        },
++        "quiz_id": {
++          "name": "quiz_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "type": {
++          "name": "type",
++          "type": "question_type",
++          "typeSchema": "public",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "title": {
++          "name": "title",
++          "type": "varchar(500)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "position": {
++          "name": "position",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "time_limit": {
++          "name": "time_limit",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 20
++        },
++        "points": {
++          "name": "points",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 1000
++        },
++        "config": {
++          "name": "config",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'{}'::jsonb"
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "questions_quiz_id_quizzes_id_fk": {
++          "name": "questions_quiz_id_quizzes_id_fk",
++          "tableFrom": "questions",
++          "tableTo": "quizzes",
++          "columnsFrom": [
++            "quiz_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.quizzes": {
++      "name": "quizzes",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true,
++          "default": "gen_random_uuid()"
++        },
++        "title": {
++          "name": "title",
++          "type": "varchar(120)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "is_public": {
++          "name": "is_public",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    }
++  },
++  "enums": {
++    "public.question_type": {
++      "name": "question_type",
++      "schema": "public",
++      "values": [
++        "multiple_choice",
++        "free_text",
++        "slider",
++        "pin",
++        "ordering",
++        "image_guess",
++        "audio_guess",
++        "closest_wins"
++      ]
++    }
++  },
++  "schemas": {},
++  "sequences": {},
++  "roles": {},
++  "policies": {},
++  "views": {},
++  "_meta": {
++    "columns": {},
++    "schemas": {},
++    "tables": {}
++  }
++}
+\ No newline at end of file
+diff --git a/drizzle/meta/_journal.json b/drizzle/meta/_journal.json
+index f3afb60..0ec2fb0 100644
+--- a/drizzle/meta/_journal.json
++++ b/drizzle/meta/_journal.json
+@@ -57,6 +57,13 @@
+       "when": 1792323375865,
+       "tag": "0007_third_talkback",
+       "breakpoints": true
++    },
++    {
++      "idx": 8,
++      "version": "7",
++      "when": 1792331036786,
++      "tag": "0008_speed_bonus",
++      "breakpoints": true
+     }
+   ]
+ }
+\ No newline at end of file
+diff --git a/lib/db/schema.ts b/lib/db/schema.ts
+index 71300e5..17e7ca7 100644
+--- a/lib/db/schema.ts
++++ b/lib/db/schema.ts
+@@ -81,6 +81,9 @@ currentQuestionIndex: integer("current_question_index")
+   .default(0)
+   .notNull(),
+ 
++    // Moment où la question courante a été lancée (sert au chrono et au bonus de rapidité).
++    questionStartedAt: timestamp("question_started_at"),
++
+     createdAt: timestamp("created_at").defaultNow().notNull(),
+   },
+   (table) => [
+@@ -137,6 +140,9 @@ export const gameAnswers = pgTable(
+ 
+     pointsAwarded: integer("points_awarded").default(0).notNull(),
+ 
++    // Temps de réponse mesuré côté serveur, en millisecondes.
++    responseTimeMs: integer("response_time_ms"),
++
+     answeredAt: timestamp("answered_at").defaultNow().notNull(),
+   },
+   (table) => [
+diff --git a/lib/scoring.ts b/lib/scoring.ts
+new file mode 100644
+index 0000000..c308e9b
+--- /dev/null
++++ b/lib/scoring.ts
+@@ -0,0 +1,54 @@
++/**
++ * Calcul des points avec bonus de rapidité.
++ *
++ * - Une bonne réponse rapporte au minimum 50 % des points de la question.
++ * - Les 50 % restants sont un bonus qui décroît linéairement avec le temps.
++ * - Répondre dans la première seconde donne le maximum.
++ * - Le serveur est la seule source de vérité : le client n'envoie jamais de temps.
++ */
++
++// Marge de latence réseau tolérée après la fin du chrono (en ms).
++export const ANSWER_GRACE_MS = 1500;
++
++// Part des points toujours acquise pour une bonne réponse.
++const BASE_RATIO = 0.5;
++
++// Pendant ce délai, le bonus est maximal (temps de lecture + latence).
++const FULL_BONUS_WINDOW_MS = 1000;
++
++export type ScoreBreakdown = {
++  base: number;
++  bonus: number;
++  total: number;
++};
++
++/**
++ * `accuracy` (0 à 1) sert aux questions à points partiels (curseur, carte,
++ * ordre) : la précision réduit les points, puis la rapidité ajoute son bonus.
++ */
++export function computeScore(
++  points: number,
++  timeLimitSeconds: number,
++  responseTimeMs: number,
++  accuracy = 1,
++): ScoreBreakdown {
++  const limitMs = Math.max(1, timeLimitSeconds) * 1000;
++  const scaled = Math.round(points * Math.min(1, Math.max(0, accuracy)));
++  const base = Math.round(scaled * BASE_RATIO);
++  const maxBonus = scaled - base;
++
++  const usable = Math.max(1, limitMs - FULL_BONUS_WINDOW_MS);
++  const elapsed = Math.max(0, responseTimeMs - FULL_BONUS_WINDOW_MS);
++  const speedRatio = 1 - Math.min(1, elapsed / usable);
++
++  const bonus = Math.round(maxBonus * speedRatio);
++
++  return { base, bonus, total: base + bonus };
++}
++
++export function isAnswerTooLate(
++  timeLimitSeconds: number,
++  responseTimeMs: number,
++): boolean {
++  return responseTimeMs > timeLimitSeconds * 1000 + ANSWER_GRACE_MS;
++}

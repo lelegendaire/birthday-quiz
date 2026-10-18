@@ -57,6 +57,13 @@
       "when": 1792323375865,
       "tag": "0007_third_talkback",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792331036786,
+      "tag": "0008_speed_bonus",
+      "breakpoints": true
     }
   ]
 }

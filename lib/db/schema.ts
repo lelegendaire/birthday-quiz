@@ -81,6 +81,9 @@ currentQuestionIndex: integer("current_question_index")
   .default(0)
   .notNull(),
 
+    // Moment où la question courante a été lancée (sert au chrono et au bonus de rapidité).
+    questionStartedAt: timestamp("question_started_at"),
+
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => [
@@ -136,6 +139,9 @@ export const gameAnswers = pgTable(
     isCorrect: boolean("is_correct"),
 
     pointsAwarded: integer("points_awarded").default(0).notNull(),
+
+    // Temps de réponse mesuré côté serveur, en millisecondes.
+    responseTimeMs: integer("response_time_ms"),
 
     answeredAt: timestamp("answered_at").defaultNow().notNull(),
   },

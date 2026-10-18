@@ -5,6 +5,7 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/lib/db";
+import { computeScore } from "@/lib/scoring";
 import {
   gameAnswers,
   gamePlayers,
@@ -65,6 +66,8 @@ export async function GET(
         questionTitle: questions.title,
         answerText: gameAnswers.answerText,
         points: questions.points,
+        timeLimit: questions.timeLimit,
+        responseTimeMs: gameAnswers.responseTimeMs,
         answeredAt: gameAnswers.answeredAt,
       })
       .from(gameAnswers)
@@ -84,7 +87,18 @@ export async function GET(
       )
       .orderBy(asc(gameAnswers.answeredAt));
 
-    return NextResponse.json({ answers: pending });
+    // Points que la réponse rapportera si elle est validée (bonus de rapidité inclus).
+    const answers = pending.map(({ timeLimit, responseTimeMs, ...answer }) => ({
+      ...answer,
+      responseTimeMs,
+      points: computeScore(
+        answer.points,
+        timeLimit,
+        responseTimeMs ?? timeLimit * 1000,
+      ).total,
+    }));
+
+    return NextResponse.json({ answers });
   } catch (error) {
     console.error("Erreur de récupération des réponses :", error);
 
@@ -132,6 +146,8 @@ export async function PATCH(
         playerId: gameAnswers.playerId,
         questionId: gameAnswers.questionId,
         points: questions.points,
+        timeLimit: questions.timeLimit,
+        responseTimeMs: gameAnswers.responseTimeMs,
       })
       .from(gameAnswers)
       .innerJoin(
@@ -154,7 +170,13 @@ export async function PATCH(
       );
     }
 
-    const pointsAwarded = correct ? pending.points : 0;
+    const pointsAwarded = correct
+      ? computeScore(
+          pending.points,
+          pending.timeLimit,
+          pending.responseTimeMs ?? pending.timeLimit * 1000,
+        ).total
+      : 0;
 
     // Une seule correction peut gagner cette mise à jour.
     const [reviewed] = await db

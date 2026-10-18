@@ -79,6 +79,7 @@ export async function POST(
       .set({
         status: "playing",
         currentQuestionIndex: 0,
+        questionStartedAt: new Date(),
       })
       .where(eq(gameSessions.id, id))
       .returning({
