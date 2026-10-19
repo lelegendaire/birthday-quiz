@@ -63,6 +63,7 @@ export async function GET(request: Request, { params }: RouteContext) {
           pointsAwarded: number;
           isCorrect: boolean | null;
         } | null = null;
+        let correctAnswer: string | null = null;
 
         if (playerId) {
           const [previousAnswer] = await db
@@ -88,6 +89,54 @@ export async function GET(request: Request, { params }: RouteContext) {
               pointsAwarded: previousAnswer.pointsAwarded,
               isCorrect: previousAnswer.isCorrect,
             };
+            
+if (previousAnswer.isCorrect !== null) {
+  switch (question.type) {
+    case "multiple_choice":
+      correctAnswer =
+        c.answers?.find(
+          (answer: any) => answer.id === c.correctAnswerId,
+        )?.text ?? null;
+      break;
+
+    case "free_text":
+    case "image_guess":
+    case "audio_guess":
+      correctAnswer = c.expectedAnswer ?? null;
+      break;
+
+    case "slider":
+    case "closest_wins":
+      correctAnswer =
+        c.target !== undefined ? String(c.target) : null;
+      break;
+
+    case "pin":
+      correctAnswer =
+        Number.isFinite(Number(c.targetLat)) &&
+        Number.isFinite(Number(c.targetLng))
+          ? `Latitude ${Number(c.targetLat).toFixed(4)}, longitude ${Number(c.targetLng).toFixed(4)}`
+          : null;
+      break;
+
+    case "ordering": {
+      const items = Array.isArray(c.items) ? c.items : [];
+      const order = Array.isArray(c.correctOrder)
+        ? c.correctOrder
+        : [];
+
+      correctAnswer = order
+        .map(
+          (id: string) =>
+            items.find((item: any) => item.id === id)?.text,
+        )
+        .filter(Boolean)
+        .join(" → ") || null;
+      break;
+    }
+  }
+}
+
           }
         }
 
@@ -101,6 +150,10 @@ export async function GET(request: Request, { params }: RouteContext) {
           config: safeConfig,
           hasAnswered,
           myAnswer,
+            correctAnswer:
+    hasAnswered && myAnswer && myAnswer.isCorrect !== null
+      ? correctAnswer
+      : null,
         };
 
 

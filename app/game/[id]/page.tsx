@@ -54,6 +54,7 @@ type PublicQuestion = {
 myAnswer?: {
   pointsAwarded: number;
   isCorrect: boolean | null;
+  correctAnswer?: string | null
 } | null;
 };
 
@@ -609,6 +610,22 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   )
 )}
 
+
+{!isHost &&
+  hasAnswered &&
+  currentQuestion.myAnswer?.isCorrect !== null &&
+  currentQuestion.myAnswer?.correctAnswer && (
+    <div className="mt-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-5">
+      <p className="flex items-center gap-2 font-bold text-emerald-300">
+        <span aria-hidden="true">✓</span>
+        Bonne réponse
+      </p>
+
+      <p className="mt-2 text-lg font-semibold text-white">
+        {currentQuestion.myAnswer.correctAnswer}
+      </p>
+    </div>
+  )}
 
 {currentQuestion.config.answers && (
   <div className="mt-6 grid gap-3 sm:grid-cols-2">
