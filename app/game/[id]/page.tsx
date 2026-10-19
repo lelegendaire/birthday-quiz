@@ -582,6 +582,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
     timeLimit={currentQuestion.timeLimit}
     serverOffsetMs={0}
   />
+</div>
   {!isHost && timeExpired && (
   <div className="mt-6 rounded-2xl border border-[#facc15]/30 bg-[#facc15]/10 p-6 text-center">
     <p className="text-sm font-bold uppercase tracking-widest text-[#facc15]">
@@ -606,21 +607,12 @@ async function reviewAnswer(answerId: string, correct: boolean) {
       </>
     ) : (
       <>
-        <p className={`mt-4 text-2xl font-black ${
-          currentQuestion.myAnswer.isCorrect
-            ? "text-emerald-300"
-            : "text-red-300"
-        }`}>
-          {currentQuestion.myAnswer.isCorrect
-            ? "Bonne réponse !"
-            : "Mauvaise réponse"}
-        </p>
-
-        <p className="mt-4 text-4xl font-black text-[#facc15]">
-          +{currentQuestion.myAnswer.pointsAwarded}
-        </p>
-        <p className="text-sm text-white/60">points gagnés cette manche</p>
-
+       <ScoreBurst
+      key={`${currentQuestion.id}-${currentQuestion.myAnswer.pointsAwarded}`}
+      total={currentQuestion.myAnswer.pointsAwarded}
+      bonus={0}
+      isCorrect={currentQuestion.myAnswer.isCorrect}
+    />
         {currentQuestion.correctAnswer && (
           <div className="mt-5 rounded-xl bg-black/20 p-4">
             <p className="text-sm text-white/50">Bonne réponse</p>
@@ -637,7 +629,6 @@ async function reviewAnswer(answerId: string, correct: boolean) {
     </p>
   </div>
 )}
-</div>
 
 
 
