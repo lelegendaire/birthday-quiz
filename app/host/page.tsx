@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, LoaderCircle, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, LoaderCircle, Sparkles } from "lucide-react";
 import Link from "next/link";
 
 export default function CreateQuizPage() {
@@ -153,9 +153,15 @@ export default function CreateQuizPage() {
              <p className="mt-2 break-all text-sm text-white/60">
   Identifiant : {createdQuizId}
 </p>
-              <p className="mt-2 text-sm text-white/60">
-                La prochaine étape sera d'ajouter les questions.
-              </p>
+              
+<Link
+  href={`/host/${createdQuizId}`}
+  className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-violet-500 px-5 py-4 font-bold text-white transition hover:bg-violet-400 active:scale-[0.98]"
+>
+  Accéder à mon quiz
+  <ArrowRight size={18} />
+</Link>
+
             </div>
           )}
 

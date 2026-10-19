@@ -3,7 +3,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { gameAnswers, gamePlayers, gameSessions, questions } from "@/lib/db/schema";
-
+import { computeScore, isAnswerTooLate } from "@/lib/scoring";
 type RouteContext = { params: Promise<{ id: string }> };
 const answerSchema = z.object({
   playerId: z.string().uuid(),
@@ -15,6 +15,7 @@ const normalize = (s: string) => s.trim().toLocaleLowerCase("fr").normalize("NFD
 const numeric = z.coerce.number().finite();
 
 export async function POST(request: Request, { params }: RouteContext) {
+  const requestReceivedAt = Date.now();
   try {
     const { id: gameId } = await params;
     if (!z.string().uuid().safeParse(gameId).success) return NextResponse.json({ error: "Identifiant de partie invalide." }, { status: 400 });
@@ -24,7 +25,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const [game] = await db.select({
       id: gameSessions.id, quizId: gameSessions.quizId, status: gameSessions.status,
-      currentQuestionIndex: gameSessions.currentQuestionIndex,
+      currentQuestionIndex: gameSessions.currentQuestionIndex,questionStartedAt: gameSessions.questionStartedAt,
     }).from(gameSessions).where(eq(gameSessions.id, gameId)).limit(1);
     if (!game) return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
     if (game.status !== "playing") return NextResponse.json({ error: "Cette partie n'accepte pas de réponses pour le moment." }, { status: 409 });
@@ -34,11 +35,28 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (!player) return NextResponse.json({ error: "Ce joueur ne fait pas partie de cette partie." }, { status: 403 });
 
     const [question] = await db.select({
-      id: questions.id, type: questions.type, points: questions.points, config: questions.config,
+      id: questions.id, type: questions.type, points: questions.points, config: questions.config,timeLimit: questions.timeLimit,
     }).from(questions).where(eq(questions.quizId, game.quizId))
       .orderBy(asc(questions.position)).limit(1).offset(game.currentQuestionIndex);
     if (!question) return NextResponse.json({ error: "Aucune question active n'a été trouvée." }, { status: 404 });
+if (!game.questionStartedAt) {
+  return NextResponse.json(
+    { error: "Le chronomètre de cette question n'est pas initialisé." },
+    { status: 409 }
+  );
+}
 
+const responseTimeMs = Math.max(
+  0,
+  requestReceivedAt - game.questionStartedAt.getTime()
+);
+
+if (isAnswerTooLate(question.timeLimit, responseTimeMs)) {
+  return NextResponse.json(
+    { error: "Le temps est écoulé pour cette question." },
+    { status: 409 }
+  );
+}
     const config = (question.config ?? {}) as Record<string, any>;
     let savedAnswerId: string | null = null;
     let savedAnswerText: string | null = null;
@@ -107,11 +125,27 @@ export async function POST(request: Request, { params }: RouteContext) {
     } else {
       return NextResponse.json({ error: "Ce type de question n'est pas pris en charge." }, { status: 400 });
     }
-
-    const inserted = await db.insert(gameAnswers).values({
-      gameId, playerId, questionId: question.id, answerId: savedAnswerId,
-      answerText: savedAnswerText, isCorrect, pointsAwarded,
-    }).onConflictDoNothing().returning({ id: gameAnswers.id });
+// Les réponses automatiques reçoivent le bonus de rapidité.
+// Les réponses en attente de correction seront scorées lors de la validation.
+if (!pendingReview && pointsAwarded > 0) {
+  pointsAwarded = computeScore(
+    pointsAwarded,
+    question.timeLimit,
+    responseTimeMs
+  ).total;
+}
+   const inserted = await db.insert(gameAnswers).values({
+  gameId,
+  playerId,
+  questionId: question.id,
+  answerId: savedAnswerId,
+  answerText: savedAnswerText,
+  isCorrect,
+  pointsAwarded,
+  responseTimeMs,
+}).onConflictDoNothing().returning({
+  id: gameAnswers.id,
+});
     if (!inserted.length) return NextResponse.json({ error: "Tu as déjà répondu à cette question." }, { status: 409 });
 
     if (pointsAwarded > 0) await db.update(gamePlayers)

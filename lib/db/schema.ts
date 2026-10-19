@@ -47,7 +47,7 @@ export const questions = pgTable("questions", {
 
   position: integer("position").notNull(),
 
-  timeLimit: integer("time_limit").default(20).notNull(),
+  timeLimit: integer("time_limit").default(60).notNull(),
 
   points: integer("points").default(1000).notNull(),
 

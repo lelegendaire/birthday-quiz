@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { z } from "zod";
 import { createHash, randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
@@ -36,6 +36,33 @@ export async function POST(request: Request) {
         { status: 404 },
       );
     }
+    const [activeGame] = await db
+  .select({
+    id: gameSessions.id,
+    pin: gameSessions.pin,
+    status: gameSessions.status,
+  })
+  .from(gameSessions)
+  .where(
+    and(
+      eq(gameSessions.quizId, quizId),
+      or(
+        eq(gameSessions.status, "waiting"),
+        eq(gameSessions.status, "playing"),
+      ),
+    ),
+  )
+  .limit(1);
+
+if (activeGame) {
+  return NextResponse.json(
+    {
+      error: "Ce quiz possède déjà une partie en cours.",
+      game: activeGame,
+    },
+    { status: 409 },
+  );
+}
 const hostToken = randomBytes(32).toString("hex");
 
 const hostTokenHash = createHash("sha256")

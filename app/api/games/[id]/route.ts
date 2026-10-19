@@ -10,7 +10,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     const { id } = await params;
     const [game] = await db.select({
       id: gameSessions.id, pin: gameSessions.pin, status: gameSessions.status,
-      quizId: gameSessions.quizId, currentQuestionIndex: gameSessions.currentQuestionIndex,
+      quizId: gameSessions.quizId, currentQuestionIndex: gameSessions.currentQuestionIndex, questionStartedAt: gameSessions.questionStartedAt,
     }).from(gameSessions).where(eq(gameSessions.id, id)).limit(1);
     if (!game) return NextResponse.json({ error: "Partie introuvable." }, { status: 404 });
 

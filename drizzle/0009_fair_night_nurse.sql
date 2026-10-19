@@ -1,0 +1,1 @@
+ALTER TABLE "questions" ALTER COLUMN "time_limit" SET DEFAULT 60;

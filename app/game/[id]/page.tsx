@@ -8,7 +8,7 @@ import dynamic from "next/dynamic";
 import { ScoreBurst } from "@/components/game/ScoreBurst";
 import { Podium } from "@/components/game/Podium";
 import { Leaderboard } from "@/components/game/Leaderboard";
-import { AnimatePresence, motion } from "framer-motion";
+import { CountdownRing } from "@/components/game/CountdownRing";
 const MapPicker = dynamic(
   () => import("@/components/maps/MapPicker"),
   {
@@ -32,6 +32,7 @@ type Game = {
   pin: string;
   status: string;
   quizId: string;
+  questionStartedAt: string | null;
 };
 
 type PublicQuestion = {
@@ -97,6 +98,35 @@ const [currentQuestion, setCurrentQuestion] =
   useState<PublicQuestion | null>(null);
 const [startingGame, setStartingGame] = useState(false);
 const [startError, setStartError] = useState("");
+const [clockNow, setClockNow] = useState(Date.now());
+
+useEffect(() => {
+  const interval = window.setInterval(() => {
+    setClockNow(Date.now());
+  }, 100);
+
+  return () => window.clearInterval(interval);
+}, []);
+const remainingSeconds =
+  currentQuestion && game?.questionStartedAt
+    ? Math.max(
+        0,
+        Math.ceil(
+          (
+            new Date(game.questionStartedAt).getTime() +
+            currentQuestion.timeLimit * 1000 -
+            clockNow
+          ) / 1000
+        )
+      )
+    : currentQuestion?.timeLimit ?? 0;
+
+const timerProgress = currentQuestion
+  ? Math.min(
+      100,
+      Math.max(0, (remainingSeconds / currentQuestion.timeLimit) * 100)
+    )
+  : 100;
 useEffect(() => {
   setIsHost(
     Boolean(
@@ -536,10 +566,19 @@ async function reviewAnswer(answerId: string, correct: boolean) {
         {currentQuestion.title}
       </h2>
 
-      <div className="mt-4 flex gap-4 text-sm text-white/50">
-        <span>{currentQuestion.timeLimit} secondes</span>
-        <span>{currentQuestion.points} points</span>
-      </div>
+      
+<div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+  <div className="flex flex-col gap-2 text-sm text-white/50">
+    <span>{currentQuestion.timeLimit} secondes maximum</span>
+    <span>{currentQuestion.points} points à gagner</span>
+  </div>
+
+  <CountdownRing
+    startedAt={game.questionStartedAt}
+    timeLimit={currentQuestion.timeLimit}
+    serverOffsetMs={0}
+  />
+</div>
 
 {!isHost && hasAnswered && currentQuestion.myAnswer && (
   currentQuestion.myAnswer.isCorrect === null ? (
@@ -787,23 +826,6 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   </div>
 )}
 
-{isHost && game?.status === "playing" && (
-  <div className="mt-6">
-    <button
-      type="button"
-      onClick={() => void nextQuestion()}
-      className="rounded-xl bg-violet-600 px-6 py-3 font-bold text-white transition hover:bg-violet-700"
-    >
-      Question suivante →
-    </button>
-
-    {startError && (
-      <p className="mt-2 text-sm text-red-400" role="alert">
-        {startError}
-      </p>
-    )}
-  </div>
-)}
 
       <p className="mt-6 text-sm text-white/40">Les réponses sont actualisées automatiquement.</p>
     </section>

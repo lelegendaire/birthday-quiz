@@ -9,6 +9,12 @@ import {
   Trophy,
   Sparkles,
   Pencil,
+  Copy,
+  Check,
+   ImagePlus,
+  Music,
+  Upload,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -18,7 +24,7 @@ const MapPicker = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[400px] items-center justify-center rounded-xl bg-gray-100">
+      <div className="flex h-100 items-center justify-center rounded-xl bg-gray-100">
         Chargement de la carte...
       </div>
     ),
@@ -93,6 +99,35 @@ function QuizEditorContent() {
   const [creatingGame, setCreatingGame] = useState(false);
   const [gamePin, setGamePin] = useState("");
   const [gameError, setGameError] = useState("");
+  const [copiedPin, setCopiedPin] = useState(false);
+  const [uploadingMedia, setUploadingMedia] = useState<
+  "image" | "audio" | null
+>(null);
+useEffect(() => {
+  if (!quizId) return;
+
+  try {
+    const rawGames = localStorage.getItem("quizpop_created_games");
+    if (!rawGames) return;
+
+    const savedGames = JSON.parse(rawGames);
+
+    if (!Array.isArray(savedGames)) return;
+
+    // Retrouve la dernière partie créée pour ce quiz.
+    const existingGame = savedGames.find(
+      (game: { quizId?: string; pin?: string }) =>
+        game.quizId === quizId && game.pin
+    );
+
+    if (existingGame) {
+      setGamePin(existingGame.pin);
+    }
+  } catch (error) {
+    console.error("Impossible de récupérer le PIN :", error);
+  }
+}, [quizId]);
+
   useEffect(() => {
     async function loadQuestions() {
       try {
@@ -144,6 +179,77 @@ function QuizEditorContent() {
 
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  async function uploadMedia(file: File, kind: "image" | "audio") {
+  const allowedTypes =
+    kind === "image"
+      ? ["image/jpeg", "image/png", "image/webp", "image/gif"]
+      : [
+          "audio/mpeg",
+          "audio/wav",
+          "audio/x-wav",
+          "audio/ogg",
+          "audio/mp4",
+          "audio/aac",
+          "audio/webm",
+        ];
+
+  const maxSize = kind === "image" ? 8 * 1024 * 1024 : 12 * 1024 * 1024;
+
+  if (!allowedTypes.includes(file.type)) {
+    setError(
+      kind === "image"
+        ? "Formats acceptés : JPG, PNG, WebP et GIF."
+        : "Format audio non accepté.",
+    );
+    return;
+  }
+
+  if (file.size === 0 || file.size > maxSize) {
+    setError(
+      kind === "image"
+        ? "L'image doit faire moins de 8 Mo."
+        : "Le son doit faire moins de 12 Mo.",
+    );
+    return;
+  }
+
+  setError("");
+  setSuccess("");
+  setUploadingMedia(kind);
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("kind", kind);
+
+    const response = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.url) {
+      throw new Error(data.error || "Impossible d'importer le fichier.");
+    }
+
+    if (kind === "image") {
+      setImageUrl(data.url);
+    } else {
+      setAudioUrl(data.url);
+    }
+
+    setSuccess(kind === "image" ? "Image importée !" : "Son importé !");
+  } catch (error) {
+    setError(
+      error instanceof Error
+        ? error.message
+        : "Une erreur est survenue pendant l'import.",
+    );
+  } finally {
+    setUploadingMedia(null);
+  }
+}
   async function addQuestion() {
     setError("");
     setSuccess("");
@@ -218,13 +324,21 @@ function QuizEditorContent() {
                             correctOrder: orderingItems.map((_, index) => String(index + 1)),
                           }
                         : type === "image_guess"
-                          ? { imageUrl: imageUrl.trim(), expectedAnswer: expectedAnswer.trim() }
+                          ?  {
+                    imageUrl: imageUrl.trim(),
+                    expectedAnswer: expectedAnswer.trim(),
+                  }
                           : type === "audio_guess"
-                            ? { audioUrl: audioUrl.trim(), expectedAnswer: expectedAnswer.trim() }
+                            ? {
+                      audioUrl: audioUrl.trim(),
+                      expectedAnswer: expectedAnswer.trim(),
+                    }
                             : type === "closest_wins"
                               ? { target: targetValue, min: minValue, max: maxValue }
                               : {},
           }),
+           ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {}),
+  ...(audioUrl.trim() ? { audioUrl: audioUrl.trim() } : {}),
         },
       );
 
@@ -312,6 +426,18 @@ function QuizEditorContent() {
       );
     }
   }
+ async function copyGamePin() {
+  try {
+    await navigator.clipboard.writeText(gamePin);
+    setCopiedPin(true);
+
+    window.setTimeout(() => {
+      setCopiedPin(false);
+    }, 2000);
+  } catch {
+    setGameError("Impossible de copier le code PIN.");
+  }
+}
   async function createGame() {
     setCreatingGame(true);
     setGameError("");
@@ -538,13 +664,29 @@ function QuizEditorContent() {
                   {gamePin}
                 </p>
 
-                <button
-                  type="button"
-                  onClick={() => void navigator.clipboard.writeText(gamePin)}
-                  className="rounded-lg border border-white/15 px-4 py-2 text-sm text-white hover:bg-white/10"
-                >
-                  Copier le PIN
-                </button>
+                
+<button
+  type="button"
+  onClick={() => void copyGamePin()}
+  className={`inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition-all duration-300 ${
+    copiedPin
+      ? "scale-105 border-emerald-400/40 bg-emerald-400/15 text-emerald-300"
+      : "border-white/15 text-white hover:border-violet-400/50 hover:bg-white/10"
+  }`}
+>
+  {copiedPin ? (
+    <>
+      <Check size={16} className="animate-in zoom-in duration-200" />
+      Copié !
+    </>
+  ) : (
+    <>
+      <Copy size={16} />
+      Copier le PIN
+    </>
+  )}
+</button>
+
               </div>
             )}
 
@@ -635,17 +777,111 @@ function QuizEditorContent() {
               )}
 
               {type === "image_guess" && (
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-white/70">URL de l'image</label>
-                  <input value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} type="url" placeholder="https://exemple.com/image.jpg" className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none focus:border-[#a78bfa]" />
-                </div>
+               
+<div className="space-y-4 rounded-2xl border border-white/10 bg-black/10 p-4">
+  <div>
+    <label
+      htmlFor="question-image"
+      className="mb-2 flex items-center gap-2 text-sm font-medium text-white/80"
+    >
+      <ImagePlus size={16} />
+      Image de la question
+      <span className="text-xs text-white/40">(facultatif)</span>
+    </label>
+
+    <input
+      id="question-image"
+      type="file"
+      accept="image/jpeg,image/png,image/webp,image/gif"
+      disabled={uploadingMedia !== null}
+      onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        if (file) void uploadMedia(file, "image");
+        event.currentTarget.value = "";
+      }}
+      className="block w-full text-sm text-white/60 file:mr-3 file:rounded-lg file:border-0 file:bg-[#8b5cf6]/20 file:px-3 file:py-2 file:text-[#c4b5fd]"
+    />
+
+    <p className="mt-1 text-xs text-white/40">
+      JPG, PNG, WebP ou GIF · 8 Mo maximum
+    </p>
+
+    {imageUrl && (
+      <div className="mt-3 rounded-xl border border-white/10 p-3">
+        <img
+          src={imageUrl}
+          alt="Aperçu de l'image de la question"
+          className="max-h-44 w-full rounded-lg object-contain"
+        />
+        <button
+          type="button"
+          onClick={() => setImageUrl("")}
+          className="mt-2 inline-flex items-center gap-1 text-xs text-red-300"
+        >
+          <X size={14} /> Retirer l’image
+        </button>
+      </div>
+    )}
+  </div>
+
+  
+</div>
+
               )}
 
               {type === "audio_guess" && (
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-white/70">URL du fichier audio</label>
-                  <input value={audioUrl} onChange={(event) => setAudioUrl(event.target.value)} type="url" placeholder="https://exemple.com/son.mp3" className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm outline-none focus:border-[#a78bfa]" />
-                </div>
+              <div className="border-t border-white/10 pt-4">
+    <label
+      htmlFor="question-audio"
+      className="mb-2 flex items-center gap-2 text-sm font-medium text-white/80"
+    >
+      <Music size={16} />
+      Son de la question
+      <span className="text-xs text-white/40">(facultatif)</span>
+    </label>
+
+    <input
+      id="question-audio"
+      type="file"
+      accept="audio/mpeg,audio/wav,audio/x-wav,audio/ogg,audio/mp4,audio/aac,audio/webm"
+      disabled={uploadingMedia !== null}
+      onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        if (file) void uploadMedia(file, "audio");
+        event.currentTarget.value = "";
+      }}
+      className="block w-full text-sm text-white/60 file:mr-3 file:rounded-lg file:border-0 file:bg-[#8b5cf6]/20 file:px-3 file:py-2 file:text-[#c4b5fd]"
+    />
+
+    <p className="mt-1 text-xs text-white/40">
+      MP3, WAV, OGG, AAC, M4A ou WebM · 12 Mo maximum
+    </p>
+
+    {audioUrl && (
+      <div className="mt-3 rounded-xl border border-white/10 p-3">
+        <audio
+          src={audioUrl}
+          controls
+          preload="metadata"
+          className="w-full"
+        />
+        <button
+          type="button"
+          onClick={() => setAudioUrl("")}
+          className="mt-2 inline-flex items-center gap-1 text-xs text-red-300"
+        >
+          <X size={14} /> Retirer le son
+        </button>
+      </div>
+    )}
+
+    {uploadingMedia && (
+      <p className="mt-3 flex items-center gap-2 text-xs text-[#c4b5fd]">
+        <Upload size={14} />
+        Envoi du fichier en cours…
+      </p>
+    )}
+  </div>
               )}
 
               {(type === "slider" || type === "closest_wins") && (
