@@ -42,6 +42,7 @@ type PublicQuestion = {
   timeLimit: number;
   points: number;
   position: number;
+  correctAnswer?: string | null;
   config: {
     answers?: { id: string; text: string }[];
     min?: number;
@@ -54,7 +55,7 @@ type PublicQuestion = {
 myAnswer?: {
   pointsAwarded: number;
   isCorrect: boolean | null;
-  correctAnswer?: string | null
+  
 } | null;
 };
 
@@ -121,7 +122,9 @@ const remainingSeconds =
         )
       )
     : currentQuestion?.timeLimit ?? 0;
-
+const timeExpired = Boolean(
+  currentQuestion && remainingSeconds <= 0
+);
 const timerProgress = currentQuestion
   ? Math.min(
       100,
@@ -579,53 +582,64 @@ async function reviewAnswer(answerId: string, correct: boolean) {
     timeLimit={currentQuestion.timeLimit}
     serverOffsetMs={0}
   />
+  {!isHost && timeExpired && (
+  <div className="mt-6 rounded-2xl border border-[#facc15]/30 bg-[#facc15]/10 p-6 text-center">
+    <p className="text-sm font-bold uppercase tracking-widest text-[#facc15]">
+      Résultats de la manche
+    </p>
+
+    {!hasAnswered || !currentQuestion.myAnswer ? (
+      <p className="mt-4 font-semibold text-white/80">
+        Temps écoulé ! Tu n'as pas envoyé de réponse.
+      </p>
+    ) : currentQuestion.myAnswer.isCorrect === null ? (
+      <>
+        <p className="mt-4 font-bold text-[#c4b5fd]">
+          Réponse en attente de correction
+        </p>
+        <p className="mt-2 text-sm text-white/60">
+          L'organisateur doit encore valider ta réponse.
+        </p>
+        <p className="mt-4 text-3xl font-black text-white">
+          +{currentQuestion.myAnswer.pointsAwarded} points
+        </p>
+      </>
+    ) : (
+      <>
+        <p className={`mt-4 text-2xl font-black ${
+          currentQuestion.myAnswer.isCorrect
+            ? "text-emerald-300"
+            : "text-red-300"
+        }`}>
+          {currentQuestion.myAnswer.isCorrect
+            ? "Bonne réponse !"
+            : "Mauvaise réponse"}
+        </p>
+
+        <p className="mt-4 text-4xl font-black text-[#facc15]">
+          +{currentQuestion.myAnswer.pointsAwarded}
+        </p>
+        <p className="text-sm text-white/60">points gagnés cette manche</p>
+
+        {currentQuestion.correctAnswer && (
+          <div className="mt-5 rounded-xl bg-black/20 p-4">
+            <p className="text-sm text-white/50">Bonne réponse</p>
+            <p className="mt-1 font-bold text-white">
+              {currentQuestion.correctAnswer}
+            </p>
+          </div>
+        )}
+      </>
+    )}
+
+    <p className="mt-5 text-sm text-white/50">
+      Ton score total est actualisé dans le classement.
+    </p>
+  </div>
+)}
 </div>
 
-{!isHost && hasAnswered && currentQuestion.myAnswer && (
-  currentQuestion.myAnswer.isCorrect === null ? (
-    <div className="mt-6 rounded-2xl border border-[#c4b5fd]/30 bg-[#8b5cf6]/10 p-5 text-center">
-      <p className="font-bold text-[#c4b5fd]">
-        Réponse envoyée !
-      </p>
-      <p className="mt-2 text-sm text-white/60">
-        En attente de la correction de l'organisateur.
-      </p>
-    </div>
-  ) : currentQuestion.myAnswer.pointsAwarded > 0 ? (
-    <ScoreBurst
-      key={currentQuestion.id}
-      total={currentQuestion.myAnswer.pointsAwarded}
-      bonus={0}
-      isCorrect={currentQuestion.myAnswer.isCorrect}
-    />
-  ) : (
-    <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5 text-center">
-      <p className="text-3xl font-black text-white/70">
-        +0 point
-      </p>
-      <p className="mt-2 text-sm font-semibold text-white/60">
-        Pas de points cette fois. La prochaine sera la bonne !
-      </p>
-    </div>
-  )
-)}
 
-
-{!isHost &&
-  hasAnswered &&
-  currentQuestion.myAnswer?.isCorrect !== null &&
-  currentQuestion.myAnswer?.correctAnswer && (
-    <div className="mt-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-5">
-      <p className="flex items-center gap-2 font-bold text-emerald-300">
-        <span aria-hidden="true">✓</span>
-        Bonne réponse
-      </p>
-
-      <p className="mt-2 text-lg font-semibold text-white">
-        {currentQuestion.myAnswer.correctAnswer}
-      </p>
-    </div>
-  )}
 
 {currentQuestion.config.answers && (
   <div className="mt-6 grid gap-3 sm:grid-cols-2">
@@ -679,7 +693,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
       onChange={(event) => setFreeText(event.target.value)}
       maxLength={2000}
       rows={3}
-      disabled={hasAnswered || submittingAnswer || !playerId}
+      disabled={hasAnswered || submittingAnswer || !playerId || timeExpired}
       placeholder="Écris ta réponse ici..."
       className="w-full resize-y rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none placeholder:text-white/30 focus:border-[#c4b5fd] disabled:opacity-50"
     />
@@ -688,7 +702,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
       <button
         type="button"
         onClick={() => void submitAnswer()}
-        disabled={!freeText.trim() || submittingAnswer || !playerId}
+        disabled={!freeText.trim() || submittingAnswer || !playerId }
         className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] transition hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-40"
       >
         {submittingAnswer ? "Envoi..." : "Envoyer ma réponse"}
@@ -701,18 +715,14 @@ async function reviewAnswer(answerId: string, correct: boolean) {
       </p>
     )}
 
-    {answerFeedback && (
-      <p role="status" className="mt-3 text-center text-sm text-white/70">
-        {answerFeedback}
-      </p>
-    )}
+    
   </div>
 )}
 
 {!isHost && currentQuestion.type === "slider" && (
   <div className="mt-6 space-y-3">
     <div className="flex justify-between text-sm text-white/50"><span>{currentQuestion.config.min}</span><span>{currentQuestion.config.max}</span></div>
-    <input type="range" min={currentQuestion.config.min ?? 0} max={currentQuestion.config.max ?? 100} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full accent-[#facc15]" />
+    <input type="range" min={currentQuestion.config.min ?? 0} max={currentQuestion.config.max ?? 100} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId || timeExpired} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full accent-[#facc15]" />
     <p className="text-center text-3xl font-black text-[#facc15]">{numericAnswer}</p>
     {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider ma réponse"}</button>}
   </div>
@@ -720,8 +730,8 @@ async function reviewAnswer(answerId: string, correct: boolean) {
 
 {!isHost && currentQuestion.type === "closest_wins" && (
   <div className="mt-6">
-    <label className="mb-2 block text-sm font-bold text-white/70">Ta estimation</label>
-    <input type="number" min={currentQuestion.config.min} max={currentQuestion.config.max} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none focus:border-[#c4b5fd] disabled:opacity-50" />
+    <label className="mb-2 block text-sm font-bold text-white/70">Ton estimation</label>
+    <input type="number" min={currentQuestion.config.min} max={currentQuestion.config.max} value={numericAnswer} disabled={hasAnswered || submittingAnswer || !playerId || timeExpired} onChange={e => setNumericAnswer(Number(e.target.value))} className="w-full rounded-xl border border-white/15 bg-black/20 p-4 text-white outline-none focus:border-[#c4b5fd] disabled:opacity-50" />
     {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={submittingAnswer || !playerId} className="mt-3 w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Envoyer mon estimation"}</button>}
   </div>
 )}
@@ -729,7 +739,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
 {!isHost && currentQuestion.type === "pin" && (
   <div className="mt-6 space-y-3">
     <p className="text-sm text-white/60">Zoome et déplace la carte, puis clique sur l'endroit que tu penses correct.</p>
-    <MapPicker value={selectedPoint} onChange={setSelectedPoint} disabled={hasAnswered || submittingAnswer || !playerId} center={[20, 0]} zoom={2} />
+    <MapPicker value={selectedPoint} onChange={setSelectedPoint} disabled={hasAnswered || submittingAnswer || !playerId || timeExpired} center={[20, 0]} zoom={2} />
     {selectedPoint && <p className="text-xs text-white/50">Position choisie : {selectedPoint.lat.toFixed(3)}, {selectedPoint.lng.toFixed(3)}</p>}
     {!hasAnswered && <button type="button" onClick={() => void submitAnswer()} disabled={!selectedPoint || submittingAnswer || !playerId} className="w-full rounded-xl bg-[#facc15] px-6 py-4 font-black text-[#171323] disabled:opacity-40">{submittingAnswer ? "Envoi..." : "Valider la position"}</button>}
   </div>

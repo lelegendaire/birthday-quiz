@@ -11,8 +11,14 @@ const answerSchema = z.object({
   answerText: z.string().trim().min(1).max(2000).optional(),
 });
 
-const normalize = (s: string) => s.trim().toLocaleLowerCase("fr").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const numeric = z.coerce.number().finite();
+const normalize = (s: string) =>
+  s
+    .trim()
+    .toLocaleLowerCase("fr")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+  const numeric = z.coerce.number().finite();
 
 export async function POST(request: Request, { params }: RouteContext) {
   const requestReceivedAt = Date.now();
@@ -71,13 +77,41 @@ if (isAnswerTooLate(question.timeLimit, responseTimeMs)) {
       savedAnswerId = answerId;
       isCorrect = answerId === config.correctAnswerId;
       pointsAwarded = isCorrect ? question.points : 0;
-    } else if (question.type === "free_text" || question.type === "image_guess" || question.type === "audio_guess") {
-      if (!answerText?.trim()) return NextResponse.json({ error: "Écris une réponse avant de l'envoyer." }, { status: 400 });
-      savedAnswerText = answerText.trim();
-      // L'organisateur corrige ces réponses pour accepter les variantes de formulation.
-      isCorrect = null;
-      pendingReview = true;
-    } else if (question.type === "slider") {
+    } else if (
+  question.type === "free_text" ||
+  question.type === "image_guess" ||
+  question.type === "audio_guess"
+) {
+  if (!answerText?.trim()) {
+    return NextResponse.json(
+      { error: "Écris une réponse avant de l'envoyer." },
+      { status: 400 }
+    );
+  }
+
+  savedAnswerText = answerText.trim();
+
+  const expectedAnswer =
+    typeof config.expectedAnswer === "string"
+      ? config.expectedAnswer.trim()
+      : "";
+
+  // Validation automatique si la réponse correspond exactement.
+  if (
+    expectedAnswer.length > 0 &&
+    normalize(savedAnswerText) === normalize(expectedAnswer)
+  ) {
+    isCorrect = true;
+    pointsAwarded = question.points;
+    pendingReview = false;
+  } else {
+    // Sinon, l'hôte conserve la possibilité de corriger manuellement.
+    isCorrect = null;
+    pointsAwarded = 0;
+    pendingReview = true;
+  }
+    }
+     else if (question.type === "slider") {
       const parsed = numeric.safeParse(answerText);
       const min = Number(config.min), max = Number(config.max), target = Number(config.target);
       if (!parsed.success || !Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(target) || max <= min || parsed.data < min || parsed.data > max) {
