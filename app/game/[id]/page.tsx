@@ -140,10 +140,19 @@ useEffect(() => {
 }, [gameId]);
   const loadGame = useCallback(async () => {
     try {
-     const response = await fetch(
-  `/api/games/${gameId}${playerId ? `?player=${encodeURIComponent(playerId)}` : ""}`,
-  { cache: "no-store" },
+    
+const hostToken = sessionStorage.getItem(
+  `quizpop_host_token_${gameId}`,
 );
+
+const response = await fetch(
+  `/api/games/${gameId}${playerId ? `?player=${encodeURIComponent(playerId)}` : ""}`,
+  {
+    cache: "no-store",
+    headers: hostToken ? { "x-host-token": hostToken } : {},
+  },
+);
+
 
       const data = await response.json();
 
@@ -153,6 +162,7 @@ useEffect(() => {
 
       setGame(data.game);
       setPlayers(data.players);
+      setIsHost(Boolean(data.isHost));
 setCurrentQuestion(data.currentQuestion ?? null);
 setHasAnswered(Boolean(data.currentQuestion?.hasAnswered));
       setError("");
@@ -446,7 +456,8 @@ async function reviewAnswer(answerId: string, correct: boolean) {
           </div>
         </header>
 
-        <section className="py-12 text-center sm:py-16">
+        {game.status === "waiting" && (
+  <section className="py-12 text-center sm:py-16">
           <p className="text-sm font-bold uppercase tracking-[0.25em] text-[#c4b5fd]">
             Rejoins la partie
           </p>
@@ -481,8 +492,9 @@ async function reviewAnswer(answerId: string, correct: boolean) {
             </p>
           </div>
         </section>
-
-        <section className="rounded-3xl border border-white/10 bg-white/5 p-5 sm:p-7">
+        )}
+        {game.status === "waiting" && (
+  <section className="rounded-3xl border border-white/10 bg-white/5 p-5 sm:p-7">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="flex items-center gap-2 text-xl font-bold">
@@ -558,31 +570,61 @@ async function reviewAnswer(answerId: string, correct: boolean) {
           </p>
         </section>
 
-     
+        )}
 <div className="mt-8 text-center">
   {game.status === "playing" && currentQuestion ? (
     <section className="mx-auto max-w-2xl rounded-3xl border border-[#8b5cf6]/40 bg-white/5 p-6 text-left sm:p-8">
-      <p className="text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
-        Question {currentQuestion.position + 1}
-      </p>
+     {isHost && (
+  <>
+    <p className="text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
+      Question {currentQuestion.position + 1}
+    </p>
 
-      <h2 className="mt-4 text-2xl font-black sm:text-3xl">
-        {currentQuestion.title}
-      </h2>
+    <h2 className="mt-4 text-2xl font-black sm:text-3xl">
+      {currentQuestion.title}
+    </h2>
 
-      
-<div className="mt-6 flex flex-wrap items-center justify-between gap-4">
-  <div className="flex flex-col gap-2 text-sm text-white/50">
-    <span>{currentQuestion.timeLimit} secondes maximum</span>
-    <span>{currentQuestion.points} points à gagner</span>
-  </div>
+    {currentQuestion.type === "image_guess" &&
+      currentQuestion.config.imageUrl && (
+        <img
+          src={currentQuestion.config.imageUrl}
+          alt="Visuel de la question"
+          className="mt-6 max-h-100 w-full rounded-xl object-contain"
+        />
+      )}
 
-  <CountdownRing
-    startedAt={game.questionStartedAt}
-    timeLimit={currentQuestion.timeLimit}
-    serverOffsetMs={0}
-  />
-</div>
+    {currentQuestion.type === "audio_guess" &&
+      currentQuestion.config.audioUrl && (
+        <audio
+          controls
+          src={currentQuestion.config.audioUrl}
+          className="mt-6 w-full"
+        >
+          Ton navigateur ne prend pas en charge l'audio.
+        </audio>
+      )}
+
+    <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+      <div className="flex flex-col gap-2 text-sm text-white/50">
+        <span>{currentQuestion.timeLimit} secondes maximum</span>
+        <span>{currentQuestion.points} points à gagner</span>
+      </div>
+
+      <CountdownRing
+        startedAt={game.questionStartedAt}
+        timeLimit={currentQuestion.timeLimit}
+        serverOffsetMs={0}
+      />
+    </div>
+  </>
+)}
+
+{!isHost && (
+  <p className="text-sm font-bold uppercase tracking-widest text-[#c4b5fd]">
+    Question {currentQuestion.position + 1}
+  </p>
+)}
+
   {!isHost && timeExpired && (
   <div className="mt-6 rounded-2xl border border-[#facc15]/30 bg-[#facc15]/10 p-6 text-center">
     <p className="text-sm font-bold uppercase tracking-widest text-[#facc15]">
@@ -665,12 +707,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
 
 {["free_text", "image_guess", "audio_guess"].includes(currentQuestion.type) && !isHost && (
   <div className="mt-6">
-    {currentQuestion.type === "image_guess" && currentQuestion.config.imageUrl && (
-      <img src={currentQuestion.config.imageUrl} alt="Image à deviner" className="mb-4 max-h-80 w-full rounded-xl object-contain" />
-    )}
-    {currentQuestion.type === "audio_guess" && currentQuestion.config.audioUrl && (
-      <audio controls src={currentQuestion.config.audioUrl} className="mb-4 w-full">Ton navigateur ne prend pas en charge l'audio.</audio>
-    )}
+   
     <label
       htmlFor="free-answer"
       className="mb-2 block text-sm font-bold text-white/70"
@@ -748,11 +785,10 @@ async function reviewAnswer(answerId: string, correct: boolean) {
   </div>
 )}
 
-{isHost && (
+{isHost && pendingAnswers.length > 0 && (
   <div className="mt-8 border-t border-white/10 pt-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <h3 className="text-xl font-black">Réponses à corriger ({pendingAnswers.length})</h3>
-      <button type="button" onClick={() => void nextQuestion()} className="rounded-xl bg-[#8b5cf6] px-4 py-3 font-bold text-white transition hover:bg-[#7c3aed]">Question suivante →</button>
     </div>
     {startError && <p role="alert" className="mt-3 text-sm text-red-300">{startError}</p>}
 
@@ -766,11 +802,7 @@ async function reviewAnswer(answerId: string, correct: boolean) {
       </p>
     )}
 
-    {pendingAnswers.length === 0 ? (
-      <p className="mt-4 text-sm text-white/40">
-        Aucune réponse libre en attente.
-      </p>
-    ) : (
+   
       <div className="mt-4 space-y-4">
         {pendingAnswers.map((answer) => (
           <div
@@ -813,8 +845,12 @@ async function reviewAnswer(answerId: string, correct: boolean) {
           </div>
         ))}
       </div>
-    )}
+    
   </div>
+)}
+{isHost && timeExpired && (
+
+      <button type="button" onClick={() => void nextQuestion()} className="rounded-xl bg-[#8b5cf6] px-4 py-3 font-bold text-white transition hover:bg-[#7c3aed]">Question suivante →</button>
 )}
 
 {!isHost && playerId && currentQuestion.config.answers && (
